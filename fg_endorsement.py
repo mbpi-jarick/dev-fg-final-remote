@@ -10,7 +10,8 @@ from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QTabWidget, QFormLayout, QLin
                              QComboBox, QDateEdit, QPushButton, QTableWidget, QTableWidgetItem,
                              QAbstractItemView, QHeaderView, QMessageBox, QHBoxLayout, QLabel,
                              QCheckBox, QDialog, QListWidget, QDialogButtonBox, QListWidgetItem,
-                             QSplitter, QGridLayout, QGroupBox, QMenu, QInputDialog, QStyle)
+                             QSplitter, QGridLayout, QGroupBox, QMenu, QInputDialog, QStyle,
+                             QFileDialog)  # <-- ADDED QFileDialog
 from PyQt6.QtGui import QDoubleValidator, QRegularExpressionValidator, QIcon
 
 # --- Qtawesome Import ---
@@ -18,6 +19,17 @@ import qtawesome as fa
 
 # --- Database Imports ---
 from sqlalchemy import text, inspect
+
+# --- EXTERNAL DEPENDENCY ADDITION (for Excel Export) ---
+try:
+    import pandas as pd
+    import os
+
+    EXCEL_EXPORT_AVAILABLE = True
+except ImportError:
+    pd = None
+    os = None
+    EXCEL_EXPORT_AVAILABLE = False
 
 # --- CONSTANTS ---
 ADMIN_PASSWORD = "itadmin"
@@ -31,7 +43,7 @@ COLOR_MANAGEMENT = '#6c757d'  # Neutral Gray
 COLOR_DEFAULT = '#34495e'  # Dark Grey for default icons
 
 
-# --- NEW: Helper Function for Formatting ---
+# --- Helper Function for Formatting ---
 def format_float_with_commas(value: Any, decimals: int = 2) -> str:
     """Formats a number (float, Decimal, or string convertible to float) with comma separators."""
     if value is None or value == '':
@@ -68,7 +80,7 @@ def set_combo_box_uppercase(combo_box: QComboBox):
             )
 
 
-# --- MODIFIED: Upgraded FloatLineEdit to handle commas ---
+# --- FloatLineEdit (Handles commas) ---
 class FloatLineEdit(QLineEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -98,6 +110,36 @@ class FloatLineEdit(QLineEdit):
             return 0.0
 
 
+# --- NEW: Date Range Selection Dialog for Export ---
+
+class DateRangeDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Export Date Range")
+        self.setModal(True)
+        layout = QFormLayout(self)
+
+        self.start_date_edit = QDateEdit(calendarPopup=True, displayFormat="yyyy-MM-dd")
+        self.end_date_edit = QDateEdit(calendarPopup=True, displayFormat="yyyy-MM-dd")
+
+        # Default to last 30 days
+        self.end_date_edit.setDate(QDate.currentDate())
+        self.start_date_edit.setDate(QDate.currentDate().addDays(-30))
+
+        layout.addRow("Start Date:", self.start_date_edit)
+        layout.addRow("End Date:", self.end_date_edit)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        layout.addRow(self.button_box)
+
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+    def get_dates(self):
+        return self.start_date_edit.date().toPyDate(), self.end_date_edit.date().toPyDate()
+
+
+# --- Existing ManageListDialog ---
 class ManageListDialog(QDialog):
     def __init__(self, parent, db_engine, table_name, column_name, title):
         super().__init__(parent)
@@ -581,6 +623,12 @@ class FGEndorsementPage(QWidget):
         top_layout.addWidget(self.search_edit, 1)
 
         self.refresh_btn = QPushButton(fa.icon('fa5s.sync-alt', color=COLOR_DEFAULT), "Refresh")
+
+        # --- NEW: Export Button ---
+        self.export_btn = QPushButton(fa.icon('fa5s.file-excel', color=COLOR_SUCCESS), "Export to Excel")
+        self.export_btn.setObjectName("PrimaryButton")
+        # --- END NEW ---
+
         self.update_btn = QPushButton(fa.icon('fa5s.edit', color=COLOR_PRIMARY), "Update Selected")
         self.delete_btn = QPushButton(fa.icon('fa5s.trash-alt', color=COLOR_DANGER), "Delete Selected")
 
@@ -588,6 +636,7 @@ class FGEndorsementPage(QWidget):
         self.delete_btn.setObjectName("delete_btn")
 
         top_layout.addWidget(self.refresh_btn)
+        top_layout.addWidget(self.export_btn)  # Add the new button
         top_layout.addWidget(self.update_btn);
         top_layout.addWidget(self.delete_btn)
         layout.addLayout(top_layout)
@@ -626,7 +675,140 @@ class FGEndorsementPage(QWidget):
         self.prev_btn.clicked.connect(self._go_to_prev_page)
         self.next_btn.clicked.connect(self._go_to_next_page)
         self.refresh_btn.clicked.connect(self._load_all_endorsements)
+        self.export_btn.clicked.connect(self._show_export_dialog)  # NEW: Connect export button
         self._on_record_selection_changed()
+
+    # --- NEW EXPORT METHODS START HERE ---
+
+    def _show_export_dialog(self):
+        """Shows the date range dialog and initiates the export process."""
+        if not EXCEL_EXPORT_AVAILABLE:
+            QMessageBox.critical(self, "Export Error",
+                                 "Cannot export: Dependencies (pandas/openpyxl) not found. Please install them.")
+            return
+
+        dialog = DateRangeDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            start_date, end_date = dialog.get_dates()
+            self._export_to_excel(start_date, end_date)
+
+    def _get_export_data(self, start_date: date, end_date: date, search_term: str):
+        """Retrieves primary, secondary, and excess data for the given date range and search filter."""
+        search_filter = f"%{search_term}%"
+
+        # Base filter applied to the primary table
+        base_filter_clause = """
+            AND date_endorsed BETWEEN :start_date AND :end_date
+            AND is_deleted IS NOT TRUE 
+            AND (system_ref_no ILIKE :st OR form_ref_no ILIKE :st OR product_code ILIKE :st OR lot_number ILIKE :st)
+        """
+
+        primary_query = f"""
+            SELECT * FROM fg_endorsements_primary 
+            WHERE 1=1 {base_filter_clause}
+            ORDER BY date_endorsed DESC
+        """
+
+        try:
+            with self.engine.connect() as conn:
+                params = {'start_date': start_date, 'end_date': end_date, 'st': search_filter}
+
+                # 1. Fetch Primary Data
+                primary_res = conn.execute(text(primary_query), params).mappings().all()
+
+                if not primary_res:
+                    return None
+
+                ref_nos = tuple(row['system_ref_no'] for row in primary_res)
+
+                # 2. Fetch Secondary (Breakdown) Data
+                secondary_query = text("""
+                    SELECT * FROM fg_endorsements_secondary 
+                    WHERE system_ref_no IN :ref_list
+                    ORDER BY system_ref_no, lot_number
+                """)
+                secondary_res = conn.execute(secondary_query, {'ref_list': ref_nos}).mappings().all()
+
+                # 3. Fetch Excess Data
+                excess_query = text("""
+                    SELECT * FROM fg_endorsements_excess 
+                    WHERE system_ref_no IN :ref_list
+                    ORDER BY system_ref_no, lot_number
+                """)
+                excess_res = conn.execute(excess_query, {'ref_list': ref_nos}).mappings().all()
+
+            return {
+                'Primary': primary_res,
+                'Breakdown': secondary_res,
+                'Excess': excess_res
+            }
+
+        except Exception as e:
+            QMessageBox.critical(self, "DB Export Error", f"Failed to retrieve data for export: {e}")
+            return None
+
+    def _export_to_excel(self, start_date: date, end_date: date):
+        """Converts retrieved data to DataFrames and saves them to a multi-sheet Excel file."""
+        current_search = self.search_edit.text()
+
+        self.show_notification(f"Preparing data for export ({start_date} to {end_date})...", 'info', 5000)
+
+        export_data = self._get_export_data(start_date, end_date, current_search)
+
+        if export_data is None:
+            QMessageBox.information(self, "Export Complete", "No records found matching the criteria for export.")
+            self.show_notification("No records found for export.", 'warning', 3000)
+            return
+
+        # 1. Ask user for file location
+        default_filename = f"FG_Endorsements_{start_date.strftime('%Y%m%d')}_to_{end_date.strftime('%Y%m%d')}.xlsx"
+        # QFileDialog imported above
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save Export File", default_filename, "Excel Files (*.xlsx)")
+
+        if not file_path:
+            self.show_notification("Export cancelled by user.", 'warning', 3000)
+            return
+
+        try:
+            # 2. Convert to DataFrames
+            df_primary = pd.DataFrame(export_data['Primary'])
+            df_breakdown = pd.DataFrame(export_data['Breakdown'])
+            df_excess = pd.DataFrame(export_data['Excess'])
+
+            # Simple cleanup: remove internal ID columns
+            for df in [df_primary, df_breakdown, df_excess]:
+                if 'id' in df.columns:
+                    df.drop(columns=['id'], inplace=True, errors='ignore')
+                if 'is_deleted' in df.columns:
+                    df.drop(columns=['is_deleted'], inplace=True, errors='ignore')
+
+            # 3. Write to Excel (Multi-Sheet)
+            with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+                df_primary.to_excel(writer, sheet_name='Primary_Endorsements', index=False)
+                df_breakdown.to_excel(writer, sheet_name='Lot_Breakdown', index=False)
+                df_excess.to_excel(writer, sheet_name='Excess_Quantities', index=False)
+
+            self.log_audit_trail("EXPORT_FG_ENDORSEMENT",
+                                 f"Exported {len(df_primary)} FG Endorsement records to Excel.")
+            self.show_notification(f"Successfully exported {len(df_primary)} primary records to Excel.", 'success',
+                                   8000)
+
+            # Optional: Open the file location (OS dependent)
+            if os.name == 'nt':  # Windows
+                os.startfile(os.path.dirname(file_path))
+            elif sys.platform == 'darwin':  # macOS
+                os.system(f'open "{os.path.dirname(file_path)}"')
+            else:  # Linux/other
+                os.system(f'xdg-open "{os.path.dirname(file_path)}"')
+
+        except Exception as e:
+            QMessageBox.critical(self, "Export Failed", f"An error occurred while writing the Excel file: {e}")
+            self.show_notification("Excel export failed.", 'error', 8000)
+
+    # --- NEW EXPORT METHODS END HERE ---
+
+    # ... (rest of the FGEndorsementPage class methods remain unchanged,
+    #      but included below for completeness)
 
     def _save_endorsement(self):
         if not self.preview_data:
@@ -686,23 +868,32 @@ class FGEndorsementPage(QWidget):
                 transaction_records = []
                 all_lots = self.preview_data.get('breakdown', []) + self.preview_data.get('excess', [])
                 for lot_data in all_lots:
+                    # --- FIX: Add bag_box_number to the transaction record ---
                     transaction_records.append({
-                        "transaction_date": primary_data["date_endorsed"], "transaction_type": "FG_ENDORSEMENT",
-                        "source_ref_no": sys_ref_no, "product_code": primary_data["product_code"],
-                        "lot_number": lot_data['lot_number'], "quantity_in": lot_data['quantity_kg'],
-                        "quantity_out": 0, "unit": "KG.", "warehouse": primary_data["location"],
+                        "transaction_date": primary_data["date_endorsed"],
+                        "transaction_type": "FG_ENDORSEMENT",
+                        "source_ref_no": sys_ref_no,
+                        "product_code": primary_data["product_code"],
+                        "lot_number": lot_data['lot_number'],
+                        "bag_box_number": primary_data["bag_no"],  # <-- THIS LINE IS ADDED
+                        "quantity_in": lot_data['quantity_kg'],
+                        "quantity_out": 0,
+                        "unit": "KG.",
+                        "warehouse": primary_data["location"],
                         "encoded_by": self.username,
                         "remarks": f"FG Endorsement via form: {primary_data['form_ref_no']}"
                     })
+
                 if transaction_records:
+                    # --- FIX: Update the INSERT statement to include the new column ---
                     conn.execute(text("""
                         INSERT INTO transactions (
                             transaction_date, transaction_type, source_ref_no, product_code, 
-                            lot_number, quantity_in, quantity_out, unit, warehouse, 
+                            lot_number, bag_box_number, quantity_in, quantity_out, unit, warehouse, 
                             encoded_by, remarks
                         ) VALUES (
                             :transaction_date, :transaction_type, :source_ref_no, :product_code, 
-                            :lot_number, :quantity_in, :quantity_out, :unit, :warehouse, 
+                            :lot_number, :bag_box_number, :quantity_in, :quantity_out, :unit, :warehouse, 
                             :encoded_by, :remarks
                         )
                     """), transaction_records)
@@ -1108,8 +1299,28 @@ class FGEndorsementPage(QWidget):
             else:
                 last_lot = calculated_lots[-1] if calculated_lots else lot_input.upper()
                 match = re.match(r'^(\d+)([A-Z]*)$', last_lot)
-                excess_lot_number = f"{str(int(match.group(1)) + 1).zfill(len(match.group(1)))}{match.group(2)}" if match else f"{last_lot}-EXCESS"
+
+                # Determine the next sequential lot number for the excess
+                if match:
+                    last_num = int(match.group(1))
+                    suffix = match.group(2)
+                    num_len = len(match.group(1))
+                    if is_range:
+                        # If it was a range, the new excess lot should follow the entire original range
+                        end_match = re.match(r'^(\d+)([A-Z]*)$', range_end_lot)
+                        if end_match:
+                            last_num = int(end_match.group(1))
+
+                    excess_lot_number = f"{str(last_num + 1).zfill(num_len)}{suffix}"
+                else:
+                    excess_lot_number = f"{last_lot}-EXCESS"  # Fallback if lot format is non-numeric
+
                 excess_data.append({'lot_number': excess_lot_number, 'quantity_kg': excess_qty})
+
+        # Recalculate totals in case ASSIGN_TO_LAST_IN_RANGE was used
+        if is_range and excess_handling_method == 'ASSIGN_TO_LAST_IN_RANGE' and breakdown_data:
+            return {"breakdown": breakdown_data, "excess": []}
+
         return {"breakdown": breakdown_data, "excess": excess_data}
 
     def _preview_endorsement(self):

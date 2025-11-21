@@ -505,7 +505,7 @@ class QCExcessEndorsementPage(QWidget):
         self.date_endorsed_edit = QDateEdit(calendarPopup=True, displayFormat="yyyy-MM-dd")
         self.product_code_combo = QComboBox(editable=True);
         set_combo_box_uppercase(self.product_code_combo)
-        self.lot_number_edit = UpperCaseLineEdit(placeholderText="E.G., 12345 (For reference only)")
+        self.lot_number_edit = UpperCaseLineEdit(placeholderText="E.G., 12345 or 12345-12347")
         self.is_lot_range_check = QCheckBox("Generate new lot numbers from a range")
         self.quantity_edit = FloatLineEdit();
         self.weight_per_lot_edit = FloatLineEdit()
@@ -741,22 +741,42 @@ class QCExcessEndorsementPage(QWidget):
 
     def _perform_lot_calculation(self, total_qty, weight_per_lot, lot_input, is_range, is_update=False):
         lot_list, excess_qty, excess_lot_number = [], Decimal(0), None
-        new_lot_base = lot_input.upper() if lot_input else "EXCESS"
-        match = re.match(r'^(\d+)([A-Z]*)$', new_lot_base)
-        single_new_lot = f"{str(int(match.group(1)) + 1).zfill(len(match.group(1)))}{match.group(2)}" if match else f"{new_lot_base}-EXCESS"
+
         if is_range:
-            if total_qty <= 0 or weight_per_lot <= 0: QMessageBox.warning(self, "Input Error",
-                                                                          "Total Qty and Weight/Lot must be > 0 for range generation."); return None
-            num_full_lots = int(total_qty // weight_per_lot);
-            excess_qty = total_qty % weight_per_lot
-            lot_list = self._parse_lot_range(new_lot_base, num_full_lots)
-            if lot_list is None: return None
+            if total_qty <= 0 or weight_per_lot <= 0:
+                QMessageBox.warning(self, "Input Error", "Total Qty and Weight/Lot must be > 0 for range generation.")
+                return None
+
+            lot_list = self._parse_lot_range(lot_input)
+            if lot_list is None: return None  # Error message handled in parsing function
+
+            num_full_lots = len(lot_list)
+            total_from_lots = weight_per_lot * num_full_lots
+
+            if total_from_lots > total_qty:
+                QMessageBox.warning(self, "Calculation Error",
+                                    f"The lot range implies a total of {total_from_lots} kg, which is greater than the Total Qty of {total_qty} kg.")
+                return None
+
+            excess_qty = total_qty - total_from_lots
+
             if excess_qty > 0:
-                last_full_lot = lot_list[-1] if lot_list else new_lot_base
+                last_full_lot = lot_list[-1]
                 match_last = re.match(r'^(\d+)([A-Z]*)$', last_full_lot)
-                excess_lot_number = f"{str(int(match_last.group(1)) + 1).zfill(len(match_last.group(1)))}{match_last.group(2)}" if match_last else f"{last_full_lot}-EXCESS"
+                if match_last:
+                    excess_lot_number = f"{str(int(match_last.group(1)) + 1).zfill(len(match_last.group(1)))}{match_last.group(2)}"
+                else:
+                    excess_lot_number = f"{last_full_lot}-EXCESS"
         else:
-            lot_list, excess_qty, excess_lot_number, weight_per_lot = [], total_qty, single_new_lot, Decimal(0)
+            # Simple excess, no range generation
+            lot_list = []
+            excess_qty = total_qty
+            match = re.match(r'^(\d+)([A-Z]*)$', lot_input.upper())
+            if match:
+                excess_lot_number = f"{str(int(match.group(1)) + 1).zfill(len(match.group(1)))}{match.group(2)}"
+            else:
+                excess_lot_number = f"{lot_input.upper()}-EXCESS" if lot_input else "EXCESS"
+
         return {"lots": lot_list, "excess_qty": excess_qty, "weight_per_lot": weight_per_lot,
                 "excess_lot_number": excess_lot_number}
 
@@ -917,11 +937,8 @@ class QCExcessEndorsementPage(QWidget):
                 self.date_endorsed_edit.setDate(q_date)
             self.product_code_combo.setCurrentText(record.get('product_code', ''));
             self.lot_number_edit.setText(record.get('lot_number', ''))
-
-            # Use the helper function here
             self.quantity_edit.setText(format_float_with_commas(record.get('quantity_kg', 0.0)))
             self.weight_per_lot_edit.setText(format_float_with_commas(record.get('weight_per_lot', 0.0)))
-
             self.status_combo.setCurrentText(record.get('status', ''));
             self.bag_number_combo.setCurrentText(record.get('bag_number', ''));
             self.box_number_combo.setCurrentText(record.get('box_number', ''));
@@ -1014,14 +1031,33 @@ class QCExcessEndorsementPage(QWidget):
                 next_seq = 1
             return f"{prefix}{next_seq:04d}"
 
-    def _parse_lot_range(self, lot_input, num_lots):
+    # --- FIX IS HERE: Corrected Lot Range Parsing ---
+    def _parse_lot_range(self, lot_input: str):
         try:
-            start_match = re.match(r'^(\d+)([A-Z]*)$', lot_input)
-            if not start_match: raise ValueError("Source Lot format must be numeric with optional text suffix.")
-            start_num, suffix, num_len = int(start_match.group(1)), start_match.group(2), len(start_match.group(1))
-            return [f"{str(start_num + 1 + i).zfill(num_len)}{suffix}" for i in range(num_lots)]
+            parts = [s.strip().upper() for s in lot_input.split('-')]
+            if len(parts) != 2:
+                raise ValueError("Lot range must contain exactly one hyphen.")
+
+            start_str, end_str = parts
+            start_match = re.match(r'^(\d+)([A-Z]*)$', start_str)
+            end_match = re.match(r'^(\d+)([A-Z]*)$', end_str)
+
+            if not start_match or not end_match:
+                raise ValueError("Lot format must be numeric with an optional text suffix (e.g., 1234AA).")
+            if start_match.group(2) != end_match.group(2):
+                raise ValueError("Start and end lot suffixes must match.")
+
+            start_num = int(start_match.group(1))
+            end_num = int(end_match.group(1))
+            suffix = start_match.group(2)
+            num_len = len(start_match.group(1))
+
+            if start_num > end_num:
+                raise ValueError("Start lot number cannot be greater than the end lot number.")
+
+            return [f"{str(i).zfill(num_len)}{suffix}" for i in range(start_num, end_num + 1)]
         except Exception as e:
-            QMessageBox.critical(self, "Lot Range Error", f"Could not generate lot range from '{lot_input}': {e}");
+            QMessageBox.critical(self, "Lot Range Error", f"Could not parse lot range '{lot_input}':\n{e}")
             return None
 
     def _populate_records_table(self, table, data, headers):
@@ -1042,7 +1078,7 @@ class QCExcessEndorsementPage(QWidget):
                 elif isinstance(value, date):
                     item_text = value.strftime('%Y-%m-%d')
                 elif isinstance(value, (float, Decimal)):
-                    item_text = format_float_with_commas(value)  # Use helper here
+                    item_text = format_float_with_commas(value)
                 else:
                     item_text = str(value or "")
                 item = QTableWidgetItem(item_text)

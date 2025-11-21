@@ -442,7 +442,7 @@ class RRFPage(QWidget):
         self.engine, self.username, self.log_audit_trail = db_engine, username, log_audit_trail_func
         self.current_editing_rrf_no, self.MAX_ITEMS = None, 15
         self.printer, self.current_pdf_buffer = QPrinter(), None
-        self.breakdown_preview_data = None
+        self.breakdown_preview_data = []  # List of dictionaries, each dict is one batch/preview entry
         self.current_page, self.records_per_page = 1, 200
         self.total_records, self.total_pages = 0, 1
         self.previous_material_type_index = 0
@@ -482,15 +482,15 @@ class RRFPage(QWidget):
                 color: {"#3a506b"}; 
             }}
 
-            /* Input Fields (QLineEdit, QDateEdit, QComboBox, QPlainTextEdit) */
-            QLineEdit, QDateEdit, QComboBox, QPlainTextEdit {{
+            /* Input Fields (QLineEdit, QDateEdit, QComboBox, QPlainTextEdit, FloatLineEdit) */
+            QLineEdit, QDateEdit, QComboBox, QPlainTextEdit, FloatLineEdit {{
                 border: 1px solid #d1d9e6; 
                 padding: 8px; 
                 border-radius: 5px;
                 background-color: {INPUT_BACKGROUND_COLOR};
                 color: {LIGHT_TEXT_COLOR};
             }}
-            QLineEdit:focus, QDateEdit:focus, QComboBox:focus, QPlainTextEdit:focus {{
+            QLineEdit:focus, QDateEdit:focus, QComboBox:focus, QPlainTextEdit:focus, FloatLineEdit:focus {{
                 border: 1px solid {PRIMARY_ACCENT_COLOR};
             }}
 
@@ -623,14 +623,17 @@ class RRFPage(QWidget):
         self.breakdown_records_tab = QWidget()
         self.deleted_tab = QWidget()
 
-        # Tabs using updated icon colors
+        # Tabs using updated icon colors (DELETED TAB ALIGNED NEXT IN RFF ENTRIES)
         self.tab_widget.addTab(self.view_tab, fa.icon('fa5s.list-alt', color=COLOR_PRIMARY), "RRF Records")
         self.tab_widget.addTab(self.entry_tab, fa.icon('fa5s.file-signature', color=COLOR_PRIMARY), "RRF Entry")
         self.tab_widget.addTab(self.view_details_tab, fa.icon('fa5s.eye', color=COLOR_SECONDARY), "View RRF Details")
+
+        # Deleted tab moved to position 4, right after the main RRF workflow tabs
+        self.tab_widget.addTab(self.deleted_tab, fa.icon('fa5s.trash', color=COLOR_DANGER), "Deleted")
+
         self.tab_widget.addTab(self.breakdown_tool_tab, fa.icon('fa5s.cut', color=COLOR_DANGER), "Lot Breakdown Tool")
         self.tab_widget.addTab(self.breakdown_records_tab, fa.icon('fa5s.database', color=COLOR_DEFAULT),
                                "Breakdown Records")
-        self.tab_widget.addTab(self.deleted_tab, fa.icon('fa5s.trash', color=COLOR_DANGER), "Deleted")
 
         self._setup_view_tab(self.view_tab)
         self._setup_entry_tab(self.entry_tab)
@@ -885,12 +888,12 @@ class RRFPage(QWidget):
 
         # Instruction Group (Fixed Height for Instructions)
         instruction_group = QGroupBox("Instructions", objectName="InstructionGroup")
-        instruction_text = "Use this tool to break down a large RRF item quantity into individual lots/bags/boxes for inventory tracking."
+        instruction_text = "Use this tool to break down a large RRF item quantity into individual lots/bags/boxes for inventory tracking. The quantity to breakdown can be edited but cannot exceed the original item quantity. Use the 'Preview' button multiple times to accumulate batches before saving."
 
         # Using QTextEdit with controlled height
         instruction_edit = QTextEdit(instruction_text)
         instruction_edit.setReadOnly(True)
-        instruction_edit.setMaximumHeight(60)
+        instruction_edit.setMaximumHeight(75)
 
         instruction_vbox = QVBoxLayout(instruction_group)
         instruction_vbox.addWidget(instruction_edit)
@@ -910,12 +913,16 @@ class RRFPage(QWidget):
         fetch_layout = QFormLayout(fetch_group)
         self.breakdown_rrf_combo = QComboBox()
         self.breakdown_item_combo = QComboBox()
-        self.breakdown_item_qty_display = QLineEdit("0.00", readOnly=True)
+
+        # --- MODIFICATION: Use FloatLineEdit for editable quantity ---
+        self.breakdown_item_qty_display = FloatLineEdit()
         self.breakdown_item_qty_display.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.breakdown_item_qty_display.setStyleSheet(f"background-color: {GROUP_BOX_HEADER_COLOR}; font-weight: bold;")
+        # Set background to standard input color
+        self.breakdown_item_qty_display.setStyleSheet(f"background-color: {INPUT_BACKGROUND_COLOR}; font-weight: bold;")
+
         fetch_layout.addRow("RRF Number:", self.breakdown_rrf_combo)
         fetch_layout.addRow("Item to Break Down:", self.breakdown_item_combo)
-        fetch_layout.addRow("Target Quantity (kg):", self.breakdown_item_qty_display)
+        fetch_layout.addRow("Quantity to Breakdown (kg):", self.breakdown_item_qty_display)
         left_layout.addWidget(fetch_group)
 
         params_group = QGroupBox("2. Define Breakdown")
@@ -987,6 +994,11 @@ class RRFPage(QWidget):
         # Connect signals
         self.breakdown_rrf_combo.currentIndexChanged.connect(self._on_breakdown_rrf_selected)
         self.breakdown_item_combo.currentIndexChanged.connect(self._on_breakdown_item_selected)
+
+        # Connect the editable quantity field to recalculation
+        self.breakdown_item_qty_display.textChanged.connect(self._recalculate_num_lots)
+        self.breakdown_item_qty_display.editingFinished.connect(self._recalculate_num_lots)
+
         self.breakdown_weight_per_lot_edit.textChanged.connect(self._recalculate_num_lots)
         preview_btn.clicked.connect(self._preview_lot_breakdown)
         clear_btn.clicked.connect(self._clear_breakdown_tool)
@@ -1028,6 +1040,7 @@ class RRFPage(QWidget):
         top_layout.addWidget(self.load_breakdown_btn)
         top_layout.addWidget(self.delete_breakdown_btn)
         layout.addWidget(controls_group)
+
         self.breakdown_records_table = QTableWidget()
         self.breakdown_records_table.setShowGrid(False)
         self.breakdown_records_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1037,6 +1050,11 @@ class RRFPage(QWidget):
         self.breakdown_records_table.verticalHeader().setVisible(False)
         self.breakdown_records_table.horizontalHeader().setHighlightSections(False)
         self.breakdown_records_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+
+        # Enable Context Menu for Breakdown Records
+        self.breakdown_records_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.breakdown_records_table.customContextMenuRequested.connect(self._show_breakdown_records_context_menu)
+
         layout.addWidget(self.breakdown_records_table)
         self.breakdown_search_edit.textChanged.connect(self._load_all_breakdown_records)
         self.refresh_breakdown_btn.clicked.connect(self._load_all_breakdown_records)
@@ -1049,6 +1067,18 @@ class RRFPage(QWidget):
         ))
         self.load_breakdown_btn.setEnabled(False)
         self.delete_breakdown_btn.setEnabled(False)
+
+    def _show_breakdown_records_context_menu(self, pos):
+        if not self.breakdown_records_table.selectedItems(): return
+        menu = QMenu()
+        delete_action = menu.addAction(fa.icon('fa5s.trash-alt', color=DESTRUCTIVE_COLOR), "Delete Breakdown")
+        load_action = menu.addAction(fa.icon('fa5s.upload', color=COLOR_SECONDARY), "Load for Update")
+
+        action = menu.exec(self.breakdown_records_table.mapToGlobal(pos))
+        if action == delete_action:
+            self._delete_selected_breakdown()
+        elif action == load_action:
+            self._load_breakdown_for_update()
 
     def _setup_deleted_tab(self, tab):
         layout = QVBoxLayout(tab)
@@ -1116,7 +1146,6 @@ class RRFPage(QWidget):
         elif tab_text == "RRF Entry" and not self.current_editing_rrf_no:
             self._load_combobox_data()
         elif tab_text == "Lot Breakdown Tool":
-            self._clear_breakdown_tool();
             self._load_rrf_numbers_for_breakdown()
         elif tab_text == "Breakdown Records":
             self._load_all_breakdown_records()
@@ -1260,36 +1289,53 @@ class RRFPage(QWidget):
             return
         QApplication.processEvents()
         for i in range(self.breakdown_item_combo.count()):
-            if (item_data := self.breakdown_item_combo.itemData(i)) and item_data.get('id') == item_id:
+            # Item data stored at UserRole contains {'id': ...}
+            item_data = self.breakdown_item_combo.itemData(i)
+            if item_data and item_data.get('id') == item_id:
                 self.breakdown_item_combo.setCurrentIndex(i);
                 break
-        self.show_notification(f"RRF Item {item_id} from RRF {rrf_no} loaded for update.", 'info')
+
+        # NOTE: Loading for update clears existing breakdown and requires the user to re-preview,
+        # which is correct for safety given the complexity of lot numbering.
+        self.show_notification(
+            f"RRF Item {item_id} from RRF {rrf_no} loaded for update. Please re-enter breakdown batches.", 'warning')
 
     def _delete_selected_breakdown(self):
         selected = self.breakdown_records_table.selectionModel().selectedRows()
         if not selected: return
         row_index = selected[0].row()
         rrf_no = self.breakdown_records_table.item(row_index, 0).text()
-        item_id = self.breakdown_records_table.item(row_index, 1).text()
+        item_id = int(self.breakdown_records_table.item(row_index, 1).text())
+
+        # Get product code for deletion targeting
+        product_code = self.breakdown_records_table.item(row_index, 2).text()
+
         reply = QMessageBox.question(self, "Confirm Deletion",
                                      f"Are you sure you want to permanently delete the lot breakdown for Item ID <b>{item_id}</b> on RRF No: <b>{rrf_no}</b>?<br><br>"
                                      "This will also remove the associated transaction logs. This action cannot be undone.",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if reply != QMessageBox.StandardButton.Yes: return
 
-        remark_text = f"Generated from RRF {rrf_no} Item ID {item_id}"
+        # Define the specific remark pattern used during insertion (RRF + Item ID)
+        specific_remark = f"Generated from RRF {rrf_no} (Item {item_id})"
+
         try:
             with self.engine.connect() as conn, conn.begin():
+                # 1. Delete breakdown records (this is unique by (rrf_no, item_id))
                 conn.execute(
                     text("DELETE FROM rrf_lot_breakdown WHERE rrf_no = :rrf_no AND item_id = :item_id"),
-                    {"rrf_no": rrf_no, "item_id": int(item_id)}
+                    {"rrf_no": rrf_no, "item_id": item_id}
                 )
+
+                # 2. Delete associated RRF_BREAKDOWN_OUT transactions
+                # We target using RRF No, Product Code, AND the precise Remarks string (Item ID)
                 conn.execute(text("""
                     DELETE FROM transactions
                     WHERE transaction_type = 'RRF_BREAKDOWN_OUT'
                     AND source_ref_no = :rrf_no
-                    AND remarks = :remarks
-                """), {"rrf_no": rrf_no, "remarks": remark_text})
+                    AND product_code = :pc
+                    AND remarks = :specific_remark
+                """), {"rrf_no": rrf_no, "pc": product_code, "specific_remark": specific_remark})
 
             self.log_audit_trail("DELETE_RRF_BREAKDOWN",
                                  f"Deleted breakdown and transactions for RRF {rrf_no}, Item {item_id}")
@@ -1471,7 +1517,10 @@ class RRFPage(QWidget):
         return data
 
     def _clear_form(self):
-        is_cancelling = self.current_editing_rrf_no is not None
+        # Identify the widget that triggered this method call
+        sender = self.sender()
+
+        # Clear the form state and all widgets
         self.current_editing_rrf_no = None
         self.rrf_no_edit.setText(self._generate_rrf_no())
         self.rrf_date_edit.setDate(QDate.currentDate())
@@ -1483,10 +1532,13 @@ class RRFPage(QWidget):
         self.cancel_update_btn.hide()
         self._update_item_count()
         self._on_item_selection_changed()
-        sender = self.sender()
-        if is_cancelling:
+
+        # --- CORRECTED NOTIFICATION LOGIC ---
+        # Only show a notification if a specific button was the sender.
+        # If called from _save_record, sender() will be None, and no notification will be shown here.
+        if sender == self.cancel_update_btn:
             self.show_notification("Update cancelled.", 'warning')
-        elif sender and sender == self.clear_btn:
+        elif sender == self.clear_btn:
             self.show_notification("Form cleared for new entry.", 'info')
 
     def _load_combobox_data(self):
@@ -1541,7 +1593,7 @@ class RRFPage(QWidget):
                     conn.execute(text("DELETE FROM rrf_items WHERE rrf_no = :rrf_no"), {"rrf_no": rrf_no})
                     log, action = "UPDATE_RRF", "updated"
 
-                    # Delete existing transactions related to this RRF (if any) before re-logging them
+                    # Delete existing base transactions related to this RRF (RRF_FG_IN/RRF_RM_OUT)
                     conn.execute(text("""
                         DELETE FROM transactions 
                         WHERE source_ref_no = :rrf_no 
@@ -1680,11 +1732,12 @@ class RRFPage(QWidget):
                                 f"Delete RRF No: <b>{rrf_no}</b> and move it to the deleted tab?") == QMessageBox.StandardButton.Yes:
             try:
                 with self.engine.connect() as conn, conn.begin():
+                    # Soft delete the primary record
                     conn.execute(text(
                         "UPDATE rrf_primary SET is_deleted = TRUE, edited_by = :u, edited_on = :n WHERE rrf_no = :rrf"),
                         {"u": self.username, "n": datetime.now(), "rrf": rrf_no})
 
-                    # Remove associated transactions upon soft delete
+                    # Remove all associated transactions upon soft delete
                     conn.execute(text("""
                         DELETE FROM transactions 
                         WHERE source_ref_no = :rrf_no 
@@ -1693,34 +1746,51 @@ class RRFPage(QWidget):
 
                 self.log_audit_trail("DELETE_RRF", f"Soft-deleted RRF: {rrf_no} and removed transactions.")
                 self.show_notification(f"RRF {rrf_no} moved to Deleted tab.", 'success')
+
+                # FIX: Clear deleted search box and refresh views immediately
+                self.deleted_search_edit.clear()
                 self._refresh_all_data_views()
+
             except Exception as e:
                 QMessageBox.critical(self, "Database Error", f"Could not delete record: {e}")
                 self.show_notification(f"Error deleting RRF {rrf_no}.", 'error')
 
     def _load_all_records(self):
-        search = f"%{self.search_edit.text()}%";
         offset = (self.current_page - 1) * self.records_per_page
         try:
             with self.engine.connect() as conn:
-                count_query_base = "FROM rrf_primary p LEFT JOIN rrf_items i ON p.rrf_no = i.rrf_no WHERE p.is_deleted IS NOT TRUE"
                 filter_clause = "";
                 params = {'limit': self.records_per_page, 'offset': offset}
+                search = f"%{self.search_edit.text()}%"
+
+                # Dynamic filtering for pagination count
                 if self.search_edit.text():
+                    count_query_sql = f"""
+                         SELECT COUNT(DISTINCT p.rrf_no) 
+                         FROM rrf_primary p 
+                         LEFT JOIN rrf_items i ON p.rrf_no = i.rrf_no 
+                         WHERE p.is_deleted IS NOT TRUE 
+                           AND (p.rrf_no ILIKE :st OR p.customer_name ILIKE :st OR i.product_code ILIKE :st)
+                     """
+                    count_res = conn.execute(text(count_query_sql), {'st': search}).scalar_one()
                     filter_clause = " AND (p.rrf_no ILIKE :st OR p.customer_name ILIKE :st OR i.product_code ILIKE :st)"
                     params['st'] = search
-                count_res = conn.execute(text(f"SELECT COUNT(DISTINCT p.id) {count_query_base} {filter_clause}"),
-                                         {'st': search} if self.search_edit.text() else {}).scalar_one()
+                else:
+                    count_res = conn.execute(
+                        text(f"SELECT COUNT(rrf_no) FROM rrf_primary WHERE is_deleted IS NOT TRUE")).scalar_one()
+
                 self.total_records = count_res
+
                 query = text(f"""
                     SELECT p.rrf_no, p.rrf_date, p.customer_name, p.material_type,
                            STRING_AGG(DISTINCT i.product_code, ', ') as product_codes, SUM(i.quantity) as total_quantity
                     FROM rrf_primary p LEFT JOIN rrf_items i ON p.rrf_no = i.rrf_no
                     WHERE p.is_deleted IS NOT TRUE {filter_clause}
-                    GROUP BY p.id, p.rrf_no, p.rrf_date, p.customer_name, p.material_type
-                    ORDER BY p.id DESC LIMIT :limit OFFSET :offset
+                    GROUP BY p.rrf_no, p.rrf_date, p.customer_name, p.material_type
+                    ORDER BY CAST(p.rrf_no AS INTEGER) DESC LIMIT :limit OFFSET :offset
                 """)
                 res = conn.execute(query, params).mappings().all()
+
             headers = ["RRF No.", "Date", "Customer/Supplier", "Material Type", "Product Codes", "Total Quantity"]
             self._populate_records_table(self.records_table, res, headers)
             self._update_pagination_controls();
@@ -1797,6 +1867,7 @@ class RRFPage(QWidget):
         search = f"%{self.deleted_search_edit.text()}%"
         try:
             with self.engine.connect() as conn:
+                # Ensure we only fetch soft-deleted records (is_deleted = TRUE)
                 query = text("""
                     SELECT rrf_no, rrf_date, customer_name, material_type, edited_by, edited_on
                     FROM rrf_primary WHERE is_deleted = TRUE
@@ -1806,6 +1877,8 @@ class RRFPage(QWidget):
                 res = conn.execute(query, {'st': search}).mappings().all()
             headers = ["RRF No.", "Date", "Customer/Supplier", "Deleted By", "Deleted On"]
             self._populate_deleted_records_table(res, headers)
+            # Ensure data reflects load state
+            self._on_deleted_record_selection_changed()
         except Exception as e:
             QMessageBox.critical(self, "DB Error", f"Could not load deleted records: {e}")
 
@@ -1856,11 +1929,12 @@ class RRFPage(QWidget):
                                 f"Restore RRF No: <b>{rrf_no}</b>?") == QMessageBox.StandardButton.Yes:
             try:
                 with self.engine.connect() as conn, conn.begin():
+                    # Restore primary record
                     conn.execute(text(
                         "UPDATE rrf_primary SET is_deleted = FALSE, edited_by = :u, edited_on = :n WHERE rrf_no = :rrf"),
                         {"u": self.username, "n": datetime.now(), "rrf": rrf_no})
 
-                    # Restore transactions upon restore
+                    # Fetch data needed for transaction restoration
                     primary_data = conn.execute(text("SELECT * FROM rrf_primary WHERE rrf_no = :rrf_no"),
                                                 {"rrf_no": rrf_no}).mappings().one()
                     items_data = conn.execute(text("SELECT * FROM rrf_items WHERE rrf_no = :rrf_no"),
@@ -1870,39 +1944,59 @@ class RRFPage(QWidget):
                     rrf_date = primary_data.get('rrf_date')
 
                     transaction_inserts = []
+
+                    # Restore base transactions (RRF_FG_IN / RRF_RM_OUT)
                     for item in items_data:
                         qty = Decimal(item.get('quantity', 0))
 
-                        if material_type == "FINISHED GOOD" or material_type == "SEMI-FINISHED GOOD" or material_type == "OTHER":
-                            # RRF for FG/SFG/Other means IN to inventory
-                            transaction_inserts.append({
-                                "transaction_date": rrf_date,
-                                "transaction_type": "RRF_FG_IN",
-                                "source_ref_no": rrf_no,
-                                "product_code": item['product_code'],
-                                "lot_number": item['lot_number'],
-                                "quantity_in": qty,
-                                "quantity_out": 0,
-                                "unit": item['unit'],
-                                "warehouse": "WH1",
-                                "encoded_by": self.username,
-                                "remarks": f"RRF Return/Replacement (Material Type: {material_type})"
-                            })
+                        if material_type in ["FINISHED GOOD", "SEMI-FINISHED GOOD", "OTHER"]:
+                            transaction_type = "RRF_FG_IN"
+                            qty_in, qty_out = qty, 0
+                            remarks = f"RRF Return/Replacement (Material Type: {material_type})"
                         elif material_type == "RAW MATERIAL":
-                            # RRF for RM means OUT of inventory (consumption/adjustment)
-                            transaction_inserts.append({
-                                "transaction_date": rrf_date,
-                                "transaction_type": "RRF_RM_OUT",
-                                "source_ref_no": rrf_no,
-                                "product_code": item['product_code'],
-                                "lot_number": item['lot_number'],
-                                "quantity_in": 0,
-                                "quantity_out": qty,
-                                "unit": item['unit'],
-                                "warehouse": "WH1",
-                                "encoded_by": self.username,
-                                "remarks": f"RRF Return/Replacement Consumption (Material Type: {material_type})"
-                            })
+                            transaction_type = "RRF_RM_OUT"
+                            qty_in, qty_out = 0, qty
+                            remarks = f"RRF Return/Replacement Consumption (Material Type: {material_type})"
+                        else:
+                            continue  # Skip unknown material types
+
+                        transaction_inserts.append({
+                            "transaction_date": rrf_date,
+                            "transaction_type": transaction_type,
+                            "source_ref_no": rrf_no,
+                            "product_code": item['product_code'],
+                            "lot_number": item['lot_number'],
+                            "quantity_in": qty_in,
+                            "quantity_out": qty_out,
+                            "unit": item['unit'],
+                            "warehouse": "WH1",
+                            "encoded_by": self.username,
+                            "remarks": remarks
+                        })
+
+                    # If RRF Breakdown records exist, restore RRF_BREAKDOWN_OUT transactions as well
+                    breakdown_records = conn.execute(text("""
+                        SELECT T1.item_id, T1.lot_number, T1.quantity_kg, T2.product_code, T2.unit
+                        FROM rrf_lot_breakdown T1
+                        JOIN rrf_items T2 ON T1.rrf_no = T2.rrf_no AND T1.item_id = T2.id
+                        WHERE T1.rrf_no = :rrf_no
+                    """), {"rrf_no": rrf_no}).mappings().all()
+
+                    remark_base = f"Generated from RRF {rrf_no}"
+                    for rec in breakdown_records:
+                        transaction_inserts.append({
+                            "transaction_date": rrf_date,
+                            "transaction_type": "RRF_BREAKDOWN_OUT",
+                            "source_ref_no": rrf_no,
+                            "product_code": rec['product_code'],
+                            "lot_number": rec['lot_number'],
+                            "quantity_in": 0,
+                            "quantity_out": rec['quantity_kg'],
+                            "unit": rec['unit'],
+                            "warehouse": "WH1",  # Default to WH1 if original location isn't stored in breakdown table
+                            "encoded_by": self.username,
+                            "remarks": f"{remark_base} (Item {rec['item_id']})"
+                        })
 
                     if transaction_inserts:
                         conn.execute(text("""
@@ -1941,9 +2035,11 @@ class RRFPage(QWidget):
         self.breakdown_weight_per_lot_edit.setText("0.00");
         self.breakdown_lot_range_edit.clear()
         self.breakdown_location_combo.setCurrentIndex(0)
+
+        # Reset cumulative data and display
+        self.breakdown_preview_data = []  # Reset to empty list
         self.breakdown_preview_table.setRowCount(0)
         self.breakdown_total_label.setText("<b>Total: 0.00 kg</b>")
-        self.breakdown_preview_data = None
         self.show_notification("Breakdown tool cleared.", 'info')
 
     def _load_rrf_numbers_for_breakdown(self):
@@ -1960,14 +2056,31 @@ class RRFPage(QWidget):
             QMessageBox.critical(self, "DB Error", f"Could not load RRF numbers for breakdown tool: {e}")
 
     def _on_breakdown_rrf_selected(self):
+        rrf_no = self.breakdown_rrf_combo.currentText()
+
+        if self.breakdown_preview_data:
+            # Check if the RRF being selected matches the RRF currently in preview
+            current_rrf_in_preview = self.breakdown_preview_data[0]['rrf_no']
+            if rrf_no and rrf_no != current_rrf_in_preview:
+                QMessageBox.warning(self, "Clear Pending Work",
+                                    "Please save or clear the current preview before changing the RRF Number.")
+                # Revert to the RRF associated with the preview data
+                idx = self.breakdown_rrf_combo.findText(current_rrf_in_preview, Qt.MatchFlag.MatchFixedString)
+                if idx >= 0:
+                    self.breakdown_rrf_combo.blockSignals(True)
+                    self.breakdown_rrf_combo.setCurrentIndex(idx)
+                    self.breakdown_rrf_combo.blockSignals(False)
+                return
+
         self.breakdown_item_combo.blockSignals(True);
         self.breakdown_item_combo.clear()
-        rrf_no = self.breakdown_rrf_combo.currentText()
+
         if not rrf_no or self.breakdown_rrf_combo.currentIndex() == 0:
             self.breakdown_item_combo.addItem("-- Select RRF First --", userData=None)
             self.breakdown_item_combo.blockSignals(False);
             self._on_breakdown_item_selected();
             return
+
         try:
             with self.engine.connect() as conn:
                 items = conn.execute(text(
@@ -1976,7 +2089,6 @@ class RRFPage(QWidget):
             self.breakdown_item_combo.addItem("-- Select an Item --", userData=None)
             for item in items:
                 quantity = item.get('quantity')
-                # Apply comma formatting to combo box display
                 display_qty = f"{float(quantity):,.2f}" if quantity is not None else "0.00"
                 self.breakdown_item_combo.addItem(
                     f"ID: {item['id']} - {display_qty} {item['unit']} - {item['product_code']}", userData=item)
@@ -1984,81 +2096,184 @@ class RRFPage(QWidget):
             QMessageBox.critical(self, "DB Error", f"Could not load items for RRF {rrf_no}: {e}")
         finally:
             self.breakdown_item_combo.blockSignals(False);
+            # Trigger item selection logic after populating
             self._on_breakdown_item_selected()
 
     def _on_breakdown_item_selected(self):
+        """
+        When an RRF item is selected. We adjust the input quantity based on accumulated batches
+        for this specific item ID, but keep the overall preview intact if the RRF is the same.
+        """
         item_data = self.breakdown_item_combo.currentData()
-        quantity = Decimal(item_data.get('quantity', 0.0)) if item_data else Decimal("0.0")
-        # Apply comma formatting to display
-        self.breakdown_item_qty_display.setText(f"{quantity:,.2f}");
+
+        if not item_data:
+            quantity = 0.0
+
+        else:
+            quantity = item_data.get('quantity', 0.0)
+            item_id = item_data['id']
+            rrf_no = item_data['rrf_no']
+
+            # Check if this item selection belongs to the currently accumulated RRF (if any)
+            if self.breakdown_preview_data and rrf_no != self.breakdown_preview_data[0]['rrf_no']:
+                # This scenario should be caught by _on_breakdown_rrf_selected, but as a safeguard:
+                QMessageBox.critical(self, "Internal Error", "RRF mismatch detected. Please clear the breakdown tool.")
+                self._clear_breakdown_tool()
+                return
+
+            # Calculate accumulated quantity for THIS specific item ID only
+            accumulated_for_this_item = sum(
+                Decimal(i['quantity_kg'])
+                for entry in self.breakdown_preview_data
+                if entry['item_id'] == item_id
+                for i in entry['items']
+            )
+
+            # Suggest the REMAINING quantity for breakdown, or the full quantity if nothing accumulated yet
+            remaining_qty = Decimal(str(quantity)) - accumulated_for_this_item
+            quantity = max(0, remaining_qty)
+
+        self.breakdown_item_qty_display.setText(str(float(quantity)))
+        self.breakdown_item_qty_display._format_text()
+
+        self.breakdown_weight_per_lot_edit.setText("0.00")
+        self.breakdown_lot_range_edit.clear()
+
         self._recalculate_num_lots()
+        self._update_cumulative_preview()
 
     def _recalculate_num_lots(self):
         try:
-            # Need to strip comma from display text before converting to Decimal
-            target_qty = Decimal(self.breakdown_item_qty_display.text().replace(',', ''))
+            # Use value() method of FloatLineEdit to get the raw float
+            target_qty_raw = self.breakdown_item_qty_display.value()
+            target_qty = Decimal(str(target_qty_raw))
+
             weight_per_lot = self.breakdown_weight_per_lot_edit.value()
+            weight_per_lot = Decimal(str(weight_per_lot))  # Convert float input to Decimal
+
             if target_qty <= 0 or weight_per_lot <= 0:
-                self.breakdown_num_lots_edit.setText("0");
+                self.breakdown_num_lots_edit.setText("0")
                 return
-            num_lots = math.ceil(target_qty / Decimal(str(weight_per_lot)))
-            self.breakdown_num_lots_edit.setText(str(num_lots))
+
+            # Use Decimal for precise calculation
+            num_lots = math.ceil(target_qty / weight_per_lot)
+            self.breakdown_num_lots_edit.setText(str(int(num_lots)))
         except (ValueError, InvalidOperation):
             self.breakdown_num_lots_edit.setText("0")
 
     def _validate_and_calculate_breakdown(self):
         try:
             item_data = self.breakdown_item_combo.currentData()
-            # Need to strip comma from display text before converting to Decimal
-            target_qty = Decimal(self.breakdown_item_qty_display.text().replace(',', ''))
+
+            if not item_data:
+                QMessageBox.warning(self, "Input Error", "Please select an RRF item to break down.");
+                return None
+
+            # 1. Get user-defined target quantity (the size of THIS breakdown attempt)
+            target_qty_raw = self.breakdown_item_qty_display.value()
+            target_qty = Decimal(str(target_qty_raw))
+
+            # 2. Get the original item quantity for validation
+            original_item_qty = Decimal(item_data.get('quantity', 0.0))
+
+            # 3. Calculate current total quantity already in the preview list for THIS specific item
+            item_id = item_data['id']
+            current_preview_total_for_item = sum(
+                Decimal(i['quantity_kg'])
+                for entry in self.breakdown_preview_data
+                if entry['item_id'] == item_id
+                for i in entry['items']
+            )
+
             weight_per_lot = self.breakdown_weight_per_lot_edit.value()
             weight_per_lot = Decimal(str(weight_per_lot))
 
             lot_input = self.breakdown_lot_range_edit.text().strip()
             num_lots = int(self.breakdown_num_lots_edit.text())
             location = self.breakdown_location_combo.currentText()
-            if not item_data: QMessageBox.warning(self, "Input Error",
-                                                  "Please select an RRF item to break down."); return None
+
+            # --- CUMULATIVE VALIDATION: Check total + new quantity against original ---
+            if target_qty + current_preview_total_for_item > original_item_qty + Decimal('0.001'):
+                QMessageBox.warning(self, "Input Error",
+                                    f"Total quantity for this item ({item_id}) exceeds its limit. Accumulated: {current_preview_total_for_item:,.2f} kg. New batch: {target_qty:,.2f} kg. Original limit: {original_item_qty:,.2f} kg.")
+                return None
+            # ------------------------------------------------------------------------
+
             if self.breakdown_location_combo.currentIndex() == 0:
                 QMessageBox.warning(self, "Input Error", "Please select a target warehouse.")
                 return None
-            if target_qty <= 0 or weight_per_lot <= 0 or num_lots <= 0: QMessageBox.warning(self, "Input Error",
-                                                                                            "Target quantity, weight per lot, and calculated lots must all be greater than zero."); return None
-            if not lot_input: QMessageBox.warning(self, "Input Error",
-                                                  "Please provide a Lot Start/Range value."); return None
-        except (ValueError, InvalidOperation):
-            QMessageBox.warning(self, "Input Error", "Please enter valid numbers for lots and weight.");
-            return None
-        lot_list = []
-        if '-' in lot_input:
-            parsed_list = self._parse_lot_range(lot_input)
-            if parsed_list is None: return None
-            if len(parsed_list) != num_lots:
-                QMessageBox.warning(self, "Mismatch Error",
-                                    f"The number of lots in your range ({len(parsed_list)}) does not match the 'Calculated No. of Lots' ({num_lots}).");
-                return None
-            lot_list = parsed_list
-        else:
-            pattern = r'^\d+[A-Z]*$';
-            if not re.match(pattern, lot_input.upper()):
+            if target_qty <= 0 or weight_per_lot <= 0 or num_lots <= 0:
                 QMessageBox.warning(self, "Input Error",
-                                    f"Invalid format for a single starting lot: '{lot_input}'. Expected '1234' or '1234AA'.");
+                                    "Target quantity, weight per lot, and calculated lots must all be greater than zero.");
                 return None
-            start_match = re.match(r'^(\d+)([A-Z]*)$', lot_input.upper())
-            if start_match:
-                start_num, suffix, num_len = int(start_match.group(1)), start_match.group(2), len(start_match.group(1))
-                lot_list = [f"{str(start_num + i).zfill(num_len)}{suffix}" for i in range(num_lots)]
+            if not lot_input:
+                QMessageBox.warning(self, "Input Error", "Please provide a Lot Start/Range value.");
+                return None
+
+        except (ValueError, InvalidOperation, IndexError) as e:
+            QMessageBox.warning(self, "Input Error", f"Please enter valid numbers for lots and weight. ({e})");
+            return None
+
+        # --- Lot list generation logic ---
+        lot_list = []
+        try:
+            if '-' in lot_input:
+                parsed_list = self._parse_lot_range(lot_input)
+                if parsed_list is None: return None
+                if len(parsed_list) != num_lots:
+                    QMessageBox.warning(self, "Mismatch Error",
+                                        f"The number of lots in your range ({len(parsed_list)}) does not match the 'Calculated No. of Lots' ({num_lots}).");
+                    return None
+                lot_list = parsed_list
             else:
-                return None
-        num_full_lots = int(target_qty // weight_per_lot);
+                pattern = r'^\d+[A-Z]*$';
+                if not re.match(pattern, lot_input.upper()):
+                    QMessageBox.warning(self, "Input Error",
+                                        f"Invalid format for a single starting lot: '{lot_input}'. Expected '1234' or '1234AA'.");
+                    return None
+                start_match = re.match(r'^(\d+)([A-Z]*)$', lot_input.upper())
+                if start_match:
+                    start_num, suffix, num_len = int(start_match.group(1)), start_match.group(2), len(
+                        start_match.group(1))
+                    lot_list = [f"{str(start_num + i).zfill(num_len)}{suffix}" for i in range(num_lots)]
+                else:
+                    return None
+        except Exception as e:
+            QMessageBox.critical(self, "Lot Generation Error", f"Error generating lots: {e}");
+            return None
+
+        # Calculate quantities for THIS batch
+        num_full_lots = int(target_qty // weight_per_lot)
         remainder_qty = target_qty % weight_per_lot
         breakdown_items = []
-        for i in range(num_full_lots): breakdown_items.append(
-            {'lot_number': lot_list[i], 'quantity_kg': weight_per_lot})
-        if remainder_qty > 0: breakdown_items.append(
-            {'lot_number': lot_list[num_full_lots], 'quantity_kg': remainder_qty})
-        return {'items': breakdown_items, 'rrf_no': item_data['rrf_no'], 'item_id': item_data['id'],
-                'location': location, 'product_code': item_data['product_code'], 'unit': item_data['unit']}
+
+        if len(lot_list) < num_lots:
+            QMessageBox.warning(self, "Mismatch Error",
+                                f"The calculated number of lots ({num_lots}) exceeds the generated lot identifiers ({len(lot_list)}). Please check your range/start lot and weight.")
+            return None
+
+        for i in range(num_full_lots):
+            breakdown_items.append({'lot_number': lot_list[i], 'quantity_kg': weight_per_lot})
+
+        # Handle the remainder lot if necessary
+        if remainder_qty > 0:
+            if num_full_lots < len(lot_list):
+                breakdown_items.append({'lot_number': lot_list[num_full_lots], 'quantity_kg': remainder_qty})
+            else:
+                QMessageBox.critical(self, "Calculation Error",
+                                     "Lot identifier count error during remainder calculation. Please contact support.")
+                return None
+
+        # Return the structured data for THIS single batch/preview attempt
+        return {
+            'items': breakdown_items,
+            'rrf_no': item_data['rrf_no'],
+            'item_id': item_data['id'],
+            'location': location,
+            'product_code': item_data['product_code'],
+            'unit': item_data['unit'],
+            'source_qty': target_qty
+        }
 
     def _parse_lot_range(self, lot_input):
         try:
@@ -2078,73 +2293,184 @@ class RRFPage(QWidget):
             return None
 
     def _preview_lot_breakdown(self):
-        self.breakdown_preview_data = None;
-        self.breakdown_preview_table.setRowCount(0)
-        self.breakdown_total_label.setText("<b>Total: 0.00 kg</b>")
-        preview_data = self._validate_and_calculate_breakdown()
-        if not preview_data: return
-        self.breakdown_preview_data = preview_data
-        items_to_display = preview_data['items']
-        self._populate_preview_table(self.breakdown_preview_table, items_to_display, ["Lot Number", "Quantity (kg)"])
-        total_preview_qty = sum(item['quantity_kg'] for item in items_to_display)
-        # Apply comma formatting to total label
+
+        new_batch_data = self._validate_and_calculate_breakdown()
+        if not new_batch_data:
+            return
+
+        # Check for lot number duplicates across ALL batches currently in preview
+        used_lot_numbers = set()
+        for entry in self.breakdown_preview_data:
+            for item in entry['items']:
+                used_lot_numbers.add(item['lot_number'])
+
+        for item in new_batch_data['items']:
+            if item['lot_number'] in used_lot_numbers:
+                QMessageBox.critical(self, "Duplicate Lot Error",
+                                     f"Lot number '{item['lot_number']}' already exists in the preview list. Please choose a different lot range.")
+                return
+
+                # Append the new batch to the cumulative data list
+        self.breakdown_preview_data.append(new_batch_data)
+
+        # Update the display and total
+        self._update_cumulative_preview()
+
+        self.show_notification(
+            f"Batch added to preview (Item ID {new_batch_data['item_id']}). Total accumulated batches: {len(self.breakdown_preview_data)}",
+            'info')
+
+        # Clear batch-specific input fields for the next batch entry
+        # We trigger the item selection logic which handles setting the remaining quantity suggestion.
+        self.breakdown_weight_per_lot_edit.setText("0.00")
+        self.breakdown_lot_range_edit.clear()
+        self.breakdown_num_lots_edit.setText("0")
+
+        # Re-trigger item selection logic to update suggested quantity based on remaining amount of the currently selected item.
+        self._on_breakdown_item_selected()
+
+    def _update_cumulative_preview(self):
+        """Helper to re-render the preview table based on self.breakdown_preview_data"""
+        items_to_display = []
+        total_preview_qty = Decimal('0.0')
+
+        # Combine all items from all batches
+        for entry in self.breakdown_preview_data:
+            for item in entry['items']:
+                items_to_display.append({
+                    'rrf_no': entry['rrf_no'],
+                    'item_id': entry['item_id'],
+                    'lot_number': item['lot_number'],
+                    'quantity_kg': item['quantity_kg'],
+                    'location': entry['location']
+                })
+                total_preview_qty += item['quantity_kg']
+
+        # Populate the table with all accumulated entries
+        headers = ["RRF No", "Item ID", "Lot Number", "Quantity (kg)", "Warehouse"]
+        self._populate_preview_table_cumulative(items_to_display, headers)
+
+        # Update the total label
         self.breakdown_total_label.setText(f"<b>Total: {float(total_preview_qty):,.2f} kg</b>")
 
     def _save_lot_breakdown(self):
         if not self.breakdown_preview_data:
-            QMessageBox.warning(self, "No Preview Data", "Please generate a preview before saving.")
+            QMessageBox.warning(self, "No Preview Data", "Please generate at least one batch preview before saving.")
             return
 
-        data = self.breakdown_preview_data
-        rrf_no, item_id, location = data['rrf_no'], data['item_id'], data['location']
+        # Ensure all entries belong to the same RRF, and get that RRF number
+        rrf_nos = {entry['rrf_no'] for entry in self.breakdown_preview_data}
+        if len(rrf_nos) != 1:
+            QMessageBox.critical(self, "Data Mismatch",
+                                 "Internal error: Breakdown batches belong to multiple RRF numbers. Please clear the tool.")
+            return
+
+        rrf_no = rrf_nos.pop()
+
+        # Group lots by their parent item_id
+        lots_by_item_id = {}
+        original_item_quantities = {}
+
+        # 1. Gather all lots and check total quantities against original item limits
+        for item_combo_idx in range(self.breakdown_item_combo.count()):
+            item_data = self.breakdown_item_combo.itemData(item_combo_idx)
+            if item_data and item_data['rrf_no'] == rrf_no:
+                original_item_quantities[item_data['id']] = Decimal(item_data['quantity'])
+
+        for batch in self.breakdown_preview_data:
+            item_id = batch['item_id']
+            if item_id not in lots_by_item_id:
+                lots_by_item_id[item_id] = {'batches': [], 'cumulative_qty': Decimal('0.0')}
+
+            lots_by_item_id[item_id]['batches'].append(batch)
+
+            # Recalculate cumulative quantity for safety
+            batch_qty = sum(item['quantity_kg'] for item in batch['items'])
+            lots_by_item_id[item_id]['cumulative_qty'] += batch_qty
+
+        # Final Check on Totals
+        for item_id, data in lots_by_item_id.items():
+            cumulative_qty = data['cumulative_qty']
+            original_qty = original_item_quantities.get(item_id, Decimal('0.0'))
+
+            if cumulative_qty > original_qty + Decimal('0.001'):
+                QMessageBox.critical(self, "Validation Error",
+                                     f"Item ID {item_id} breakdown total ({cumulative_qty:,.2f} kg) exceeds its original quantity ({original_qty:,.2f} kg). Cannot save.")
+                return
+
+        total_lots = sum(data['cumulative_qty'] for data in lots_by_item_id.values())
+        total_lot_count = sum(len(batch['items']) for data in lots_by_item_id.values() for batch in data['batches'])
 
         reply = QMessageBox.question(self, "Confirm Save",
-                                     f"This will <b>delete any existing breakdown</b> for Item ID {item_id} on RRF {rrf_no} and save this new one. "
-                                     f"It will also log {len(data['items'])} new 'Quantity Out' records in the central transactions table.\n\nProceed?",
+                                     f"This will process breakdowns for RRF <b>{rrf_no}</b> across {len(lots_by_item_id)} item(s), replacing any existing breakdown for these items. "
+                                     f"Total lots generated: {total_lot_count} ({total_lots:,.2f} kg).\n\nProceed?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
 
         if reply == QMessageBox.StandardButton.Cancel: return
 
-        records_to_insert = [{'rrf_no': rrf_no, 'item_id': item_id, **item} for item in data['items']]
-        remark_text = f"Generated from RRF {rrf_no} Item ID {item_id}"
-
+        # Start Transaction
         try:
             with self.engine.connect() as conn, conn.begin():
                 rrf_date = conn.execute(text("SELECT rrf_date FROM rrf_primary WHERE rrf_no = :rrf_no"),
                                         {"rrf_no": rrf_no}).scalar_one()
 
-                conn.execute(text("DELETE FROM rrf_lot_breakdown WHERE rrf_no = :rrf_no AND item_id = :item_id"),
-                             {"rrf_no": rrf_no, "item_id": item_id})
+                all_breakdown_inserts = []
+                all_transaction_inserts = []
+                remark_base = f"Generated from RRF {rrf_no}"
 
-                conn.execute(text("""
-                    DELETE FROM transactions
-                    WHERE transaction_type = 'RRF_BREAKDOWN_OUT'
-                    AND source_ref_no = :rrf_no
-                    AND remarks = :remarks
-                """), {"rrf_no": rrf_no, "remarks": remark_text})
+                for item_id, data in lots_by_item_id.items():
+                    # 0. Get Product Code and Unit from the first batch of this item for transaction logging consistency
+                    if not data['batches']: continue
+                    product_code = data['batches'][0]['product_code']
+                    unit = data['batches'][0]['unit']
 
-                if records_to_insert:
+                    # 1. Delete existing records for THIS SPECIFIC ITEM ID
+                    conn.execute(text("DELETE FROM rrf_lot_breakdown WHERE rrf_no = :rrf_no AND item_id = :item_id"),
+                                 {"rrf_no": rrf_no, "item_id": item_id})
+
+                    # 2. Delete old RRF_BREAKDOWN_OUT transactions for THIS SPECIFIC ITEM ID
+                    specific_remark = f"{remark_base} (Item {item_id})"
+
+                    conn.execute(text("""
+                        DELETE FROM transactions
+                        WHERE transaction_type = 'RRF_BREAKDOWN_OUT'
+                        AND source_ref_no = :rrf_no
+                        AND product_code = :pc 
+                        AND remarks = :specific_remark
+                    """), {"rrf_no": rrf_no, "specific_remark": specific_remark, "pc": product_code})
+
+                    for batch in data['batches']:
+                        # Insert new breakdown records
+                        for rec in batch['items']:
+                            all_breakdown_inserts.append({
+                                'rrf_no': rrf_no,
+                                'item_id': item_id,
+                                'lot_number': rec['lot_number'],
+                                'quantity_kg': rec['quantity_kg']
+                            })
+
+                            # Insert corresponding transactions
+                            all_transaction_inserts.append({
+                                "transaction_date": rrf_date,
+                                "transaction_type": "RRF_BREAKDOWN_OUT",
+                                "source_ref_no": rrf_no,
+                                "product_code": product_code,
+                                "lot_number": rec['lot_number'],
+                                "quantity_in": 0,
+                                "quantity_out": rec['quantity_kg'],
+                                "unit": unit,
+                                "warehouse": batch['location'],
+                                "encoded_by": self.username,
+                                "remarks": specific_remark  # Use the unique remark
+                            })
+
+                # Bulk insert operations
+                if all_breakdown_inserts:
                     conn.execute(text(
                         "INSERT INTO rrf_lot_breakdown (rrf_no, item_id, lot_number, quantity_kg) VALUES (:rrf_no, :item_id, :lot_number, :quantity_kg)"),
-                        records_to_insert)
+                        all_breakdown_inserts)
 
-                transactions_to_insert = []
-                for rec in records_to_insert:
-                    transactions_to_insert.append({
-                        "transaction_date": rrf_date,
-                        "transaction_type": "RRF_BREAKDOWN_OUT",
-                        "source_ref_no": rrf_no,
-                        "product_code": data['product_code'],
-                        "lot_number": rec['lot_number'],
-                        "quantity_in": 0,
-                        "quantity_out": rec['quantity_kg'],
-                        "unit": data['unit'],
-                        "warehouse": location,
-                        "encoded_by": self.username,
-                        "remarks": remark_text
-                    })
-
-                if transactions_to_insert:
+                if all_transaction_inserts:
                     conn.execute(text("""
                         INSERT INTO transactions (
                             transaction_date, transaction_type, source_ref_no, product_code,
@@ -2154,10 +2480,12 @@ class RRFPage(QWidget):
                             :lot_number, :quantity_in, :quantity_out, :unit, :warehouse,
                             :encoded_by, :remarks
                         )
-                    """), transactions_to_insert)
+                    """), all_transaction_inserts)
 
-            self.log_audit_trail("CREATE_RRF_BREAKDOWN", f"Saved breakdown for RRF: {rrf_no}, Item: {item_id}")
-            self.show_notification(f"Lot breakdown for RRF {rrf_no} saved.", 'success')
+            self.log_audit_trail("CREATE_RRF_BREAKDOWN",
+                                 f"Saved breakdown for RRF: {rrf_no}, across {len(lots_by_item_id)} items.")
+            self.show_notification(f"Lot breakdown for RRF {rrf_no} saved. Total lots: {len(all_breakdown_inserts)}",
+                                   'success')
             self._clear_breakdown_tool()
             self._load_all_breakdown_records()
         except Exception as e:
@@ -2165,23 +2493,43 @@ class RRFPage(QWidget):
             self.show_notification("Error saving breakdown. See dialog for details.", 'error')
             print(traceback.format_exc())
 
-    def _populate_preview_table(self, table_widget, data, headers):
+    def _populate_preview_table_cumulative(self, data, headers):
+        table_widget = self.breakdown_preview_table
         table_widget.setRowCount(0);
         table_widget.setColumnCount(len(headers));
         table_widget.setHorizontalHeaderLabels(headers)
-        if not data: table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); return
+        if not data:
+            table_widget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            return
+
         table_widget.setRowCount(len(data));
-        keys = list(data[0].keys()) if data else []
+
+        # Keys matching the structure built in _update_cumulative_preview
+        keys = ["rrf_no", "item_id", "lot_number", "quantity_kg", "location"]
+
         for i, row_data in enumerate(data):
             for j, key in enumerate(keys):
                 val = row_data.get(key)
-                # Apply comma formatting
-                item = QTableWidgetItem(f"{val:,.2f}" if isinstance(val, (Decimal, float)) else str(val or ""))
-                if isinstance(val, (Decimal, float)): item.setTextAlignment(
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+                if key == 'quantity_kg' and isinstance(val, (Decimal, float)):
+                    item_text = f"{float(val):,.2f}"
+                else:
+                    item_text = str(val or "")
+
+                item = QTableWidgetItem(item_text)
+
+                if key == 'quantity_kg':
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
                 table_widget.setItem(i, j, item)
+
         table_widget.resizeColumnsToContents()
-        table_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        # Set column stretch/resize modes
+        table_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # RRF No
+        table_widget.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # Item ID
+        table_widget.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)  # Lot Number
+        table_widget.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Quantity
+        table_widget.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Warehouse
 
     # --- PDF GENERATION AND PRINTING (Logic Unchanged) ---
     def _trigger_print_preview_from_form(self):

@@ -3,7 +3,7 @@ import traceback
 import re
 from datetime import datetime, date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import List, Dict, Any, Mapping, Set
+from typing import List, Dict, Any, Mapping
 
 # --- PyQt6 Imports ---
 from PyQt6.QtCore import Qt, QDate, QTimer, QSize
@@ -32,12 +32,12 @@ LIGHT_TEXT_COLOR = '#333333'
 GROUP_BOX_HEADER_COLOR = '#f4f7fc'
 
 # --- Icon Colors (Darker shades for visibility against light buttons) ---
-COLOR_SUCCESS = '#27ae60'
-COLOR_DANGER = '#c0392b'
-COLOR_PRIMARY = '#2980b9'
-COLOR_SECONDARY = '#d35400'
-COLOR_MANAGEMENT = '#7d3c98'
-COLOR_DEFAULT = '#34495e'
+COLOR_SUCCESS = '#27ae60'  # Darker green for visibility
+COLOR_DANGER = '#c0392b'  # Darker red for visibility
+COLOR_PRIMARY = '#2980b9'  # Darker blue for visibility
+COLOR_SECONDARY = '#d35400'  # Darker orange for visibility
+COLOR_MANAGEMENT = '#7d3c98'  # Darker purple for visibility
+COLOR_DEFAULT = '#34495e'  # Dark grey for default icons
 
 
 # --- Helper Function for Formatting Quantities ---
@@ -47,12 +47,16 @@ def format_float_with_commas(value: Any, decimals: int = 2) -> str:
         return f"0.{'0' * decimals}"
     try:
         if isinstance(value, str):
+            # Attempt to clean potential existing commas for safe float conversion
             cleaned_value = value.replace(',', '')
             value = float(cleaned_value)
         elif isinstance(value, Decimal):
             value = float(value)
+
+        # Format using standard locale-independent comma notation
         return f"{value:,.{decimals}f}"
     except (ValueError, TypeError):
+        # Fallback if conversion fails
         return str(value)
 
 
@@ -70,6 +74,8 @@ class UpperCaseLineEdit(QLineEdit):
 class FloatLineEdit(QLineEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Using a standard validator, which typically does not handle comma input directly,
+        # so we rely on _format_text and value() to handle display and retrieval.
         validator = QDoubleValidator(0.0, 99999999.0, 6)
         validator.setNotation(QDoubleValidator.Notation.StandardNotation)
         self.setValidator(validator)
@@ -79,14 +85,18 @@ class FloatLineEdit(QLineEdit):
 
     def _format_text(self):
         try:
+            # Remove existing commas for safe float conversion
             text_cleaned = self.text().replace(',', '')
             value = float(text_cleaned or 0.0)
+
+            # Apply comma formatting
             self.setText(format_float_with_commas(value))
         except ValueError:
             self.setText("0.00")
 
     def value(self) -> float:
         try:
+            # Ensure commas are removed when retrieving the numerical value
             return float(self.text().replace(',', '') or 0.0)
         except ValueError:
             return 0.0
@@ -104,6 +114,8 @@ class ManageListDialog(QDialog):
         layout.addWidget(self.list_widget)
 
         button_layout = QHBoxLayout()
+
+        # ADD ICONS (COLORED)
         add_btn = QPushButton(fa.icon('fa5s.plus', color=COLOR_SUCCESS), "Add")
         remove_btn = QPushButton(fa.icon('fa5s.trash-alt', color=COLOR_DANGER), "Remove")
 
@@ -120,6 +132,8 @@ class ManageListDialog(QDialog):
         add_btn.clicked.connect(self._add_item)
         remove_btn.clicked.connect(self._remove_item)
         self._load_items()
+
+        # Apply specific dialog styles
         self.setStyleSheet(f"""
             QDialog {{ background-color: {INPUT_BACKGROUND_COLOR}; }}
             QLabel {{ background-color: transparent; }}
@@ -140,9 +154,16 @@ class ManageListDialog(QDialog):
             QMessageBox.critical(self, "DB Error", f"Could not load items: {e}")
 
     def _add_item(self):
-        input_text, ok = QInputDialog.getText(self, "Add New Item", "New Value:")
-        if ok and input_text:
-            value = input_text.strip().upper()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add New Item")
+        layout, edit = QFormLayout(dialog), UpperCaseLineEdit()
+        layout.addRow("New Value:", edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        layout.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        if dialog.exec():
+            value = edit.text().strip()
             if value:
                 try:
                     with self.engine.connect() as conn, conn.begin():
@@ -151,7 +172,6 @@ class ManageListDialog(QDialog):
                                 f"INSERT INTO {self.table_name} ({self.column_name}) VALUES (:v) ON CONFLICT ({self.column_name}) DO NOTHING"),
                             {"v": value})
                     self._load_items()
-                    self.accept()
                 except Exception as e:
                     QMessageBox.critical(self, "DB Error", f"Could not add item: {e}")
 
@@ -164,7 +184,6 @@ class ManageListDialog(QDialog):
                     conn.execute(text(f"DELETE FROM {self.table_name} WHERE id = :id"),
                                  {"id": item.data(Qt.ItemDataRole.UserRole)})
                 self._load_items()
-                self.accept()
             except Exception as e:
                 QMessageBox.critical(self, "DB Error", f"Could not remove item: {e}")
 
@@ -184,7 +203,9 @@ class AddItemDialog(QDialog):
         self.product_code = UpperCaseLineEdit()
         self.lot_used = UpperCaseLineEdit()
 
+        # ADD ICON (COLORED) - Light Button Style
         self.check_inventory_btn = QPushButton(fa.icon('fa5s.search', color=COLOR_SECONDARY), "Check Stock")
+
         self.inventory_status_label = QLabel("Status: Awaiting check...")
         self.inventory_status_label.setStyleSheet("font-style: italic; color: #555; background-color: transparent;")
 
@@ -201,9 +222,12 @@ class AddItemDialog(QDialog):
         self.box_num.addItems([""] + [str(i) for i in range(1, 1000)])
         self.rem_qty = FloatLineEdit()
         self.qty_prod = QComboBox(editable=True)
+
         self.warehouse_combo = QComboBox()
 
+        # ADD ICON (COLORED) - Light Button Style
         manage_qty_prod_btn = QPushButton(fa.icon('fa5s.wrench', color=COLOR_DEFAULT), "Manage...")
+
         qty_prod_layout = QHBoxLayout()
         qty_prod_layout.setContentsMargins(0, 0, 0, 0)
         qty_prod_layout.addWidget(self.qty_prod, 1)
@@ -230,6 +254,7 @@ class AddItemDialog(QDialog):
         self.ok_button = self.button_box.button(QDialogButtonBox.StandardButton.Ok)
         self.ok_button.setEnabled(False)
 
+        # Set button object names for light style application
         self.check_inventory_btn.setObjectName("SecondaryButton")
         self.ok_button.setObjectName("PrimaryButton")
         manage_qty_prod_btn.setObjectName("DefaultButton")
@@ -245,18 +270,28 @@ class AddItemDialog(QDialog):
             self.prod_id.setText(data.get('prod_id', ''))
             self.product_code.setText(data.get('product_code', ''))
             self.lot_used.setText(data.get('lot_used', ''))
-            self.qty_req.setText(format_float_with_commas(data.get('quantity_required_kg', 0.0)))
+
+            # --- APPLY COMMA FORMATTING ---
+            qty_req = data.get('quantity_required_kg', 0.0)
+            self.qty_req.setText(format_float_with_commas(qty_req))
+
             self.new_lot.setText(data.get('new_lot_details', ''))
             self.status.setCurrentText(data.get('status', ''))
             self.box_num.setCurrentText(str(data.get('box_number', '')))
-            self.rem_qty.setText(format_float_with_commas(data.get('remaining_quantity', 0.0)))
+
+            # --- APPLY COMMA FORMATTING ---
+            rem_qty = data.get('remaining_quantity', 0.0)
+            self.rem_qty.setText(format_float_with_commas(rem_qty))
+
             self.qty_prod.setCurrentText(data.get('quantity_produced', ''))
             self.warehouse_combo.setCurrentText(data.get('warehouse', ''))
             if self.lot_used.text():
                 self._check_lot_in_inventory()
 
     def accept(self):
-        if self.rem_qty.value() > self.qty_req.value():
+        qty_req = self.qty_req.value()
+        rem_qty = self.rem_qty.value()
+        if rem_qty > qty_req:
             QMessageBox.warning(self, "Validation Error", "The 'Remaining Qty' cannot be greater than the 'Qty Req'd'.")
             return
         if not self.warehouse_combo.currentText():
@@ -294,8 +329,8 @@ class AddItemDialog(QDialog):
     def _manage_qty_produced_list(self):
         dialog = ManageListDialog(self, self.engine, "outgoing_qty_produced_options", "value",
                                   "Manage Qty Produced Options")
-        if dialog.exec():
-            self._load_qty_produced_options()
+        dialog.exec()
+        self._load_qty_produced_options()
 
     def get_data(self):
         return {
@@ -344,11 +379,14 @@ class AddItemDialog(QDialog):
             return
 
         lots_to_check = []
+
+        # FIX: Call the parsing method from the parent widget (OutgoingFormPage)
         parse_func = getattr(self.parent(), '_parse_lot_range', None)
 
         if parse_func and '-' in lot_number_input:
             lots_to_check = parse_func(lot_number_input)
-            if lots_to_check is None: return
+            if lots_to_check is None:
+                return
         else:
             lots_to_check = [lot_number_input]
 
@@ -371,6 +409,8 @@ class AddItemDialog(QDialog):
                 self.inventory_status_label.setText(label_text)
                 self.inventory_status_label.setStyleSheet(
                     "font-weight: bold; color: #2ecc71; background-color: transparent;")
+
+                # --- APPLY COMMA FORMATTING TO QTY REQ ---
                 self.qty_req.setText(formatted_stock)
             else:
                 label_text = f"Status: WARNING - No stock found. (Total: {formatted_stock} kg)"
@@ -379,6 +419,7 @@ class AddItemDialog(QDialog):
                 self.inventory_status_label.setText(label_text)
                 self.inventory_status_label.setStyleSheet(
                     "font-weight: bold; color: #f39c12; background-color: transparent;")
+
         except Exception as e:
             self.inventory_status_label.setText("Status: Error during inventory check.")
             self.inventory_status_label.setStyleSheet(
@@ -400,13 +441,12 @@ class OutgoingFormPage(QWidget):
         self.current_editing_primary_id = None
         self.current_page, self.records_per_page = 1, 200
         self.total_records, self.total_pages = 0, 1
-        self.releasers_cache = []
-        self.qty_produced_options_cache = []
         self.init_ui()
         self._load_all_records()
 
     def _parse_lot_range(self, lot_input):
-        """Helper method to parse lot ranges (e.g., '100A-105A') into a list of individual lot numbers."""
+        """Helper method to parse lot ranges (e.g., '100A-105A') into a list of individual lot numbers.
+        MOVED FROM AddItemDialog to be accessible by OutgoingFormPage for saving/restoring transactions."""
         try:
             parts = [s.strip().upper() for s in lot_input.split('-')]
             if len(parts) != 2:
@@ -432,15 +472,19 @@ class OutgoingFormPage(QWidget):
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(10, 10, 10, 10)
 
+        # MAIN HEADER
         header_widget = QWidget()
         header_layout = QHBoxLayout(header_widget)
         header_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Icon
         icon_pixmap = fa.icon('fa5s.sign-out-alt', color="#3a506b").pixmap(QSize(28, 28))
         icon_label = QLabel()
         icon_label.setPixmap(icon_pixmap)
         header_layout.addWidget(icon_label, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        # Title
         title_label = QLabel("Outgoing Form Management", objectName="PageHeader")
         title_label.setFont(QFont("Segoe UI", 15, QFont.Weight.Bold))
         header_layout.addWidget(title_label)
@@ -453,6 +497,7 @@ class OutgoingFormPage(QWidget):
         self.view_details_tab, self.entry_tab = QWidget(), QWidget()
         self.deleted_tab = QWidget()
 
+        # ADD TABS WITH COLORED ICONS (Using standard COLOR_PRIMARY, COLOR_SUCCESS, etc. for icons)
         self.tab_widget.addTab(view_tab, fa.icon('fa5s.list', color=COLOR_PRIMARY), "All Outgoing")
         self.tab_widget.addTab(self.entry_tab, fa.icon('fa5s.file-alt', color=COLOR_PRIMARY), "Form Entry")
         self.tab_widget.addTab(self.view_details_tab, fa.icon('fa5s.search', color=COLOR_SECONDARY), "View Details")
@@ -463,58 +508,199 @@ class OutgoingFormPage(QWidget):
         self._setup_view_details_tab(self.view_details_tab)
         self._setup_deleted_tab(self.deleted_tab)
 
+        # APPLY GLOBAL UI STYLES
         self.setStyleSheet(self._get_styles())
+
+        self.notification_label = QLabel("")
+        self.notification_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.notification_label.setStyleSheet("padding: 8px; font-weight: bold; border-radius: 4px;")
+        self.notification_label.hide()
+        main_layout.addWidget(self.notification_label)
+        self.notification_timer = QTimer(self)
+        self.notification_timer.setSingleShot(True)
+        self.notification_timer.timeout.connect(self.notification_label.hide)
         self.tab_widget.setTabEnabled(self.tab_widget.indexOf(self.view_details_tab), False)
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
 
     def _get_styles(self) -> str:
         return f"""
-            QWidget {{ background-color: {BACKGROUND_CONTENT_COLOR}; color: {LIGHT_TEXT_COLOR}; font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; }}
-            QLabel {{ background-color: {INPUT_BACKGROUND_COLOR}; color: {LIGHT_TEXT_COLOR}; padding: 0 4px; }}
-            QLabel#PageHeader {{ font-size: 15pt; font-weight: bold; color: #3a506b; background-color: transparent; }}
-            QLineEdit, QDateEdit, QComboBox {{ border: 1px solid #d1d9e6; padding: 8px; border-radius: 5px; background-color: {INPUT_BACKGROUND_COLOR}; color: {LIGHT_TEXT_COLOR}; }}
-            QLineEdit:focus, QDateEdit:focus, QComboBox:focus {{ border: 1px solid {PRIMARY_ACCENT_COLOR}; }}
-            QGroupBox {{ border: 1px solid #e0e5eb; border-radius: 8px; margin-top: 12px; background-color: {INPUT_BACKGROUND_COLOR}; }}
-            QGroupBox::title {{ subcontrol-origin: margin; subcontrol-position: top left; padding: 2px 10px; background-color: {GROUP_BOX_HEADER_COLOR}; border: 1px solid #e0e5eb; border-bottom: 1px solid {INPUT_BACKGROUND_COLOR}; border-top-left-radius: 8px; border-top-right-radius: 8px; font-weight: bold; color: #4f4f4f; }}
-            .InstructionBox {{ background-color: #e9f0ff; border: 1px solid {PRIMARY_ACCENT_COLOR}; border-radius: 6px; margin-bottom: 10px; padding: 10px; }}
-            .InstructionBox QLabel {{ background-color: transparent; padding: 0; }}
-            QPushButton {{ border: 1px solid #d1d9e6; padding: 8px 15px; border-radius: 6px; font-weight: bold; color: {LIGHT_TEXT_COLOR}; background-color: {INPUT_BACKGROUND_COLOR}; qproperty-iconSize: 16px; }}
-            QPushButton:hover {{ background-color: #f0f3f8; border: 1px solid #c0c0c0; }}
-            QPushButton#PrimaryButton {{ border: 1px solid {COLOR_PRIMARY}; color: {COLOR_PRIMARY}; }}
-            QPushButton#PrimaryButton:hover {{ background-color: #ecf0f1; }}
-            QPushButton#SecondaryButton {{ border: 1px solid {COLOR_SECONDARY}; color: {COLOR_SECONDARY}; }}
-            QPushButton#SecondaryButton:hover {{ background-color: #fcf3cf; }}
-            QPushButton#DefaultButton {{ border: 1px solid {NEUTRAL_COLOR}; color: {NEUTRAL_COLOR}; }}
-            QPushButton#DefaultButton:hover {{ background-color: #f0f3f8; }}
-            QPushButton#delete_btn, QPushButton#remove_item_btn {{ border: 1px solid {COLOR_DANGER}; color: {COLOR_DANGER}; }}
-            QPushButton#delete_btn:hover, QPushButton#remove_item_btn:hover {{ background-color: #fddde1; }}
-            QTableWidget {{ border: 1px solid #e0e5eb; background-color: {INPUT_BACKGROUND_COLOR}; selection-behavior: SelectRows; color: {LIGHT_TEXT_COLOR}; border-radius: 8px; }}
-            QTableWidget::item {{ border-bottom: 1px solid #f4f7fc; padding: 5px; }}
-            QTableWidget::item:selected {{ background-color: {TABLE_SELECTION_COLOR}; color: white; border: 0px; }}
+            /* Base Widget Styles */
+            QWidget {{ 
+                background-color: {BACKGROUND_CONTENT_COLOR};
+                color: {LIGHT_TEXT_COLOR};
+                font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+            }}
+
+            /* EXPLICITLY SET ALL LABELS TO WHITE BACKGROUND */
+            QLabel {{
+                background-color: {INPUT_BACKGROUND_COLOR};
+                color: {LIGHT_TEXT_COLOR};
+                padding: 0 4px;
+            }}
+
+            /* Header Title */
+            QLabel#PageHeader {{ 
+                font-size: 15pt; 
+                font-weight: bold; 
+                color: {"#3a506b"}; 
+                background-color: transparent; /* Exception for main header area */
+            }}
+
+            /* Input Fields (QLineEdit, QDateEdit, QComboBox) */
+            QLineEdit, QDateEdit, QComboBox {{
+                border: 1px solid #d1d9e6; 
+                padding: 8px; 
+                border-radius: 5px;
+                background-color: {INPUT_BACKGROUND_COLOR};
+                color: {LIGHT_TEXT_COLOR};
+            }}
+            QLineEdit:focus, QDateEdit:focus, QComboBox:focus {{
+                border: 1px solid {PRIMARY_ACCENT_COLOR};
+            }}
+
+            /* Group Box Styling */
+            QGroupBox {{
+                border: 1px solid #e0e5eb; border-radius: 8px;
+                margin-top: 12px; background-color: {INPUT_BACKGROUND_COLOR};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin; subcontrol-position: top left;
+                padding: 2px 10px; background-color: {GROUP_BOX_HEADER_COLOR};
+                border: 1px solid #e0e5eb; border-bottom: 1px solid {INPUT_BACKGROUND_COLOR};
+                border-top-left-radius: 8px; border-top-right-radius: 8px;
+                font-weight: bold; color: #4f4f4f;
+            }}
+
+            /* Instruction Box Style (Using the frame class defined locally) */
+            .InstructionBox {{
+                background-color: #e9f0ff; /* Light accent background */
+                border: 1px solid {PRIMARY_ACCENT_COLOR};
+                border-radius: 6px;
+                margin-bottom: 10px;
+                padding: 10px;
+            }}
+            .InstructionBox QLabel {{
+                background-color: transparent;
+                padding: 0;
+            }}
+
+            /* --- BUTTON STYLES (Light Color Scheme) --- */
+            QPushButton {{
+                border: 1px solid #d1d9e6; 
+                padding: 8px 15px;
+                border-radius: 6px;
+                font-weight: bold;
+                color: {LIGHT_TEXT_COLOR}; 
+                background-color: {INPUT_BACKGROUND_COLOR}; 
+                qproperty-iconSize: 16px;
+            }}
+            QPushButton:hover {{
+                background-color: #f0f3f8;
+                border: 1px solid #c0c0c0;
+            }}
+
+            /* Primary Button (Save/Restore) */
+            QPushButton#PrimaryButton {{
+                border: 1px solid {COLOR_PRIMARY}; 
+                color: {COLOR_PRIMARY}; 
+            }}
+            QPushButton#PrimaryButton:hover {{
+                background-color: #ecf0f1; 
+            }}
+
+            /* Secondary Button (Update/Fetch/Check Stock) */
+            QPushButton#SecondaryButton {{
+                border: 1px solid {COLOR_SECONDARY};
+                color: {COLOR_SECONDARY};
+            }}
+            QPushButton#SecondaryButton:hover {{
+                background-color: #fcf3cf;
+            }}
+
+            /* Default Button (Manage lists - using gray accent for utility) */
+            QPushButton#DefaultButton {{
+                border: 1px solid {NEUTRAL_COLOR}; 
+                color: {NEUTRAL_COLOR}; 
+            }}
+            QPushButton#DefaultButton:hover {{
+                background-color: #f0f3f8;
+            }}
+
+            /* Delete/Remove Button */
+            QPushButton#delete_btn, QPushButton#remove_item_btn {{
+                border: 1px solid {COLOR_DANGER}; 
+                color: {COLOR_DANGER}; 
+            }}
+            QPushButton#delete_btn:hover, QPushButton#remove_item_btn:hover {{
+                background-color: #fddde1;
+            }}
+
+            /* Table Styling */
+            QTableWidget {{
+                border: 1px solid #e0e5eb;
+                background-color: {INPUT_BACKGROUND_COLOR};
+                selection-behavior: SelectRows;
+                color: {LIGHT_TEXT_COLOR};
+                border-radius: 8px;
+            }}
+            QTableWidget::item {{
+                border-bottom: 1px solid #f4f7fc;
+                padding: 5px;
+            }}
+            QTableWidget::item:selected {{
+                background-color: {TABLE_SELECTION_COLOR}; 
+                color: white;
+                border: 0px; 
+            }}
         """
+
+    def show_notification(self, message: str, level: str = 'info', duration_ms: int = 5000):
+        self.notification_timer.stop()
+        level_styles = {
+            'info': "background-color: #3498db; color: white;",
+            'success': "background-color: #2ecc71; color: white;",
+            'warning': "background-color: #f39c12; color: white;",
+            'error': "background-color: #e74c3c; color: white;"
+        }
+        base_style = "padding: 8px; font-weight: bold; border-radius: 4px;"
+        self.notification_label.setStyleSheet(base_style + level_styles.get(level, level_styles['info']))
+        self.notification_label.setText(message)
+        self.notification_label.show()
+        self.notification_timer.start(duration_ms)
 
     def _setup_deleted_tab(self, tab):
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        # INSTRUCTIONS
         instruction_frame = QFrame()
         instruction_frame.setProperty('class', 'InstructionBox')
         instruction_layout = QHBoxLayout(instruction_frame)
         instruction_label = QLabel(
-            "<b>Deleted Records:</b> These are forms soft-deleted from the main view. Restoring a record re-adds its corresponding inventory transactions to the system.")
+            "<b>Deleted Records:</b> These are forms soft-deleted from the main view. Restoring a record re-adds its corresponding inventory transactions (stock-out) to the system."
+        )
         instruction_label.setWordWrap(True)
         instruction_layout.addWidget(instruction_label)
         layout.addWidget(instruction_frame)
+
         controls_group = QGroupBox("Search & Restore")
         top_layout = QHBoxLayout(controls_group)
+
         top_layout.addWidget(QLabel("Search Deleted:"))
         self.deleted_search_edit = UpperCaseLineEdit(placeholderText="Filter deleted records...")
         top_layout.addWidget(self.deleted_search_edit, 1)
+
+        # BUTTONS - Light Button Style
         self.deleted_refresh_btn = QPushButton(fa.icon('fa5s.sync-alt', color=COLOR_DEFAULT), "Refresh")
         self.deleted_refresh_btn.setObjectName("DefaultButton")
         self.restore_btn = QPushButton(fa.icon('fa5s.undo', color=COLOR_PRIMARY), "Restore Selected")
         self.restore_btn.setObjectName("PrimaryButton")
+
         top_layout.addWidget(self.deleted_refresh_btn)
         top_layout.addWidget(self.restore_btn)
         layout.addWidget(controls_group)
+
         self.deleted_records_table = QTableWidget()
         self.deleted_records_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.deleted_records_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -527,6 +713,7 @@ class OutgoingFormPage(QWidget):
         self.deleted_records_table.customContextMenuRequested.connect(self._show_deleted_table_context_menu)
         self.deleted_records_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.deleted_records_table)
+
         self.deleted_search_edit.textChanged.connect(self._load_deleted_records)
         self.restore_btn.clicked.connect(self._restore_record)
         self.deleted_records_table.itemSelectionChanged.connect(self._on_deleted_record_selection_changed)
@@ -535,29 +722,40 @@ class OutgoingFormPage(QWidget):
 
     def _setup_view_tab(self, tab):
         layout = QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+
+        # INSTRUCTIONS
         instruction_frame = QFrame()
         instruction_frame.setProperty('class', 'InstructionBox')
         instruction_layout = QHBoxLayout(instruction_frame)
         instruction_label = QLabel(
-            "<b>All Records:</b> Lists all active outgoing forms. Double-click a row or use 'Update Selected' to load a form for editing.")
+            "<b>All Records:</b> Lists all active outgoing forms. Double-click a row or use 'Update Selected' to load a form for editing."
+        )
         instruction_label.setWordWrap(True)
         instruction_layout.addWidget(instruction_label)
         layout.addWidget(instruction_frame)
+
         controls_group = QGroupBox("Search & Actions")
         top_layout = QHBoxLayout(controls_group)
+
         top_layout.addWidget(QLabel("Search:"))
         self.search_edit = UpperCaseLineEdit(placeholderText="Filter by Prod'n ID, Ref#, Activity...")
         top_layout.addWidget(self.search_edit, 1)
+
+        # BUTTONS - Light Button Style
         self.refresh_btn = QPushButton(fa.icon('fa5s.sync-alt', color=COLOR_DEFAULT), "Refresh")
         self.refresh_btn.setObjectName("DefaultButton")
         self.update_btn = QPushButton(fa.icon('fa5s.edit', color=COLOR_PRIMARY), "Update Selected")
         self.update_btn.setObjectName("PrimaryButton")
         self.delete_btn = QPushButton(fa.icon('fa5s.trash-alt', color=COLOR_DANGER), "Delete Selected")
         self.delete_btn.setObjectName("delete_btn")
+
         top_layout.addWidget(self.refresh_btn)
         top_layout.addWidget(self.update_btn)
         top_layout.addWidget(self.delete_btn)
         layout.addWidget(controls_group)
+
         self.records_table = QTableWidget()
         self.records_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.records_table.setShowGrid(False)
@@ -570,12 +768,15 @@ class OutgoingFormPage(QWidget):
         self.records_table.customContextMenuRequested.connect(self._show_records_table_context_menu)
         self.records_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.records_table)
+
         pagination_layout = QHBoxLayout()
+        # BUTTONS - Light Button Style
         self.prev_btn = QPushButton(fa.icon('fa5s.arrow-left', color="#3a506b"), "Previous")
         self.prev_btn.setObjectName("PrimaryButton")
         self.next_btn = QPushButton(fa.icon('fa5s.arrow-right', color="#3a506b"), "Next")
         self.next_btn.setObjectName("PrimaryButton")
         self.next_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+
         self.page_label = QLabel("Page 1 of 1")
         pagination_layout.addStretch()
         pagination_layout.addWidget(self.prev_btn)
@@ -583,6 +784,7 @@ class OutgoingFormPage(QWidget):
         pagination_layout.addWidget(self.next_btn)
         pagination_layout.addStretch()
         layout.addLayout(pagination_layout)
+
         self.refresh_btn.clicked.connect(self._load_all_records)
         self.search_edit.textChanged.connect(self._on_search_text_changed)
         self.update_btn.clicked.connect(self._load_record_for_update)
@@ -595,34 +797,47 @@ class OutgoingFormPage(QWidget):
 
     def _setup_entry_tab(self, tab):
         main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
+
+        # INSTRUCTIONS
         instruction_frame = QFrame()
         instruction_frame.setProperty('class', 'InstructionBox')
         instruction_layout = QHBoxLayout(instruction_frame)
         instruction_label = QLabel(
-            "<b>Form Entry:</b> Select or enter a Prod'n Form ID and click 'Fetch Details' to populate items. Use 'Add Item' to include additional inventory lots.")
+            "<b>Form Entry:</b> Enter primary form details above. Use 'Fetch Details' to pull initial item lists from Production. Use the 'Add Item' button to enter inventory lots being consumed (stock-out transactions)."
+        )
         instruction_label.setWordWrap(True)
         instruction_layout.addWidget(instruction_label)
         main_layout.addWidget(instruction_frame)
+
         primary_group = QGroupBox("Form Details")
         primary_layout = QGridLayout(primary_group)
         self.production_form_id_combo = QComboBox()
         self.production_form_id_combo.setEditable(True)
+
+        # BUTTONS - Light Button Style
         self.fetch_details_btn = QPushButton(fa.icon('fa5s.database', color=COLOR_SECONDARY), "Fetch Details")
         self.fetch_details_btn.setObjectName("SecondaryButton")
+
         self.ref_no_edit = UpperCaseLineEdit()
         self.date_out_edit = QDateEdit(calendarPopup=True, displayFormat="yyyy-MM-dd")
         self.activity_edit = UpperCaseLineEdit()
         self.released_by_combo = QComboBox(editable=True)
+
         prod_id_layout = QHBoxLayout()
-        prod_id_layout.setContentsMargins(0, 0, 0, 0)
-        prod_id_layout.addWidget(self.production_form_id_combo, 1)
+        prod_id_layout.addWidget(self.production_form_id_combo)
         prod_id_layout.addWidget(self.fetch_details_btn)
+
+        # BUTTONS - Light Button Style
         self.manage_releasers_btn = QPushButton(fa.icon('fa5s.users', color=COLOR_DEFAULT), "Manage...")
         self.manage_releasers_btn.setObjectName("DefaultButton")
+
         released_by_layout = QHBoxLayout()
         released_by_layout.setContentsMargins(0, 0, 0, 0)
         released_by_layout.addWidget(self.released_by_combo, 1)
         released_by_layout.addWidget(self.manage_releasers_btn)
+
         primary_layout.addWidget(QLabel("Prod'n Form ID#/Series#:"), 0, 0)
         primary_layout.addLayout(prod_id_layout, 0, 1)
         primary_layout.addWidget(QLabel("Ref#:"), 0, 2)
@@ -634,6 +849,7 @@ class OutgoingFormPage(QWidget):
         primary_layout.addWidget(QLabel("Released By:"), 2, 2)
         primary_layout.addLayout(released_by_layout, 2, 3)
         main_layout.addWidget(primary_group)
+
         items_group = QGroupBox("Outgoing Items")
         items_layout = QVBoxLayout(items_group)
         self.entry_items_table = QTableWidget()
@@ -646,31 +862,39 @@ class OutgoingFormPage(QWidget):
         self.entry_items_table.verticalHeader().setVisible(False)
         self.entry_items_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         items_layout.addWidget(self.entry_items_table)
+
         item_buttons_layout = QHBoxLayout()
+
+        # BUTTONS - Light Button Style
         self.add_item_btn = QPushButton(fa.icon('fa5s.plus', color=COLOR_PRIMARY), "Add Item")
         self.add_item_btn.setObjectName("PrimaryButton")
         self.edit_item_btn = QPushButton(fa.icon('fa5s.edit', color=COLOR_SECONDARY), "Edit Selected")
         self.edit_item_btn.setObjectName("SecondaryButton")
         self.remove_item_btn = QPushButton(fa.icon('fa5s.minus', color=COLOR_DANGER), "Remove Selected")
         self.remove_item_btn.setObjectName("remove_item_btn")
+
         item_buttons_layout.addStretch()
         item_buttons_layout.addWidget(self.add_item_btn)
         item_buttons_layout.addWidget(self.edit_item_btn)
         item_buttons_layout.addWidget(self.remove_item_btn)
         items_layout.addLayout(item_buttons_layout)
         main_layout.addWidget(items_group, 1)
+
         button_layout = QHBoxLayout()
+        # BUTTONS - Light Button Style
         self.save_btn = QPushButton(fa.icon('fa5s.save', color=COLOR_PRIMARY), "Save Form")
         self.save_btn.setObjectName("PrimaryButton")
         self.clear_btn = QPushButton(fa.icon('fa5s.eraser', color=COLOR_DEFAULT), "New")
         self.clear_btn.setObjectName("DefaultButton")
         self.cancel_update_btn = QPushButton(fa.icon('fa5s.times-circle', color=COLOR_DANGER), "Cancel Update")
         self.cancel_update_btn.setObjectName("delete_btn")
+
         button_layout.addStretch()
         button_layout.addWidget(self.cancel_update_btn)
         button_layout.addWidget(self.clear_btn)
         button_layout.addWidget(self.save_btn)
         main_layout.addLayout(button_layout)
+
         self.fetch_details_btn.clicked.connect(self._fetch_production_details)
         self.add_item_btn.clicked.connect(self._show_add_item_dialog)
         self.edit_item_btn.clicked.connect(self._show_edit_item_dialog)
@@ -700,12 +924,16 @@ class OutgoingFormPage(QWidget):
         items_layout.addWidget(self.view_items_table)
         main_layout.addWidget(items_group, 1)
 
+    # --- Methods involving context menus (ADDING ICONS) ---
+
     def _show_records_table_context_menu(self, pos):
         if not self.records_table.selectedItems(): return
         menu = QMenu()
+
         view_action = menu.addAction(fa.icon('fa5s.search', color=COLOR_PRIMARY), "View Details")
         edit_action = menu.addAction(fa.icon('fa5s.edit', color=COLOR_PRIMARY), "Load for Update")
         delete_action = menu.addAction(fa.icon('fa5s.trash-alt', color=COLOR_DANGER), "Delete Record")
+
         action = menu.exec(self.records_table.mapToGlobal(pos))
         if action == view_action:
             self._show_selected_record_in_view_tab()
@@ -717,13 +945,17 @@ class OutgoingFormPage(QWidget):
     def _show_deleted_table_context_menu(self, pos):
         if not self.deleted_records_table.selectedItems(): return
         menu = QMenu()
+
         restore_action = menu.addAction(fa.icon('fa5s.undo', color=COLOR_PRIMARY), "Restore Record")
         view_action = menu.addAction(fa.icon('fa5s.search', color=COLOR_PRIMARY), "View Details")
+
         action = menu.exec(self.deleted_records_table.mapToGlobal(pos))
         if action == restore_action:
             self._restore_record()
         elif action == view_action:
             self._show_selected_deleted_record_in_view_tab()
+
+    # --- Other necessary methods (Logic Unchanged, only adapting button icons) ---
 
     def _on_tab_changed(self, index):
         tab_title = self.tab_widget.tabText(index)
@@ -743,8 +975,11 @@ class OutgoingFormPage(QWidget):
         is_cancelling = self.current_editing_primary_id is not None
         self.current_editing_primary_id = None
         self.cancel_update_btn.hide()
+
+        # Reset save button text and icon
         self.save_btn.setText("Save Form")
         self.save_btn.setIcon(fa.icon('fa5s.save', color=COLOR_PRIMARY))
+
         self.production_form_id_combo.setCurrentIndex(-1)
         self.ref_no_edit.clear()
         self.activity_edit.clear()
@@ -752,11 +987,21 @@ class OutgoingFormPage(QWidget):
         self.date_out_edit.setDate(QDate.currentDate())
         self.entry_items_table.setRowCount(0)
         self.production_form_id_combo.setFocus()
-        if is_cancelling: QMessageBox.warning(self, "Cancelled", "Update has been cancelled.")
+        self._load_combobox_data()
+        sender = self.sender()
+        if is_cancelling:
+            self.show_notification("Update cancelled.", 'warning')
+        elif sender and isinstance(sender, QPushButton):
+            self.show_notification("Form cleared for new entry.", 'info')
 
     def _show_add_item_dialog(self):
-        dialog_data = {'prod_id': self.production_form_id_combo.currentText().strip(), 'quantity_required_kg': 0.0,
-                       'remaining_quantity': 0.0}
+        # When adding a new item, ensure quantities are initialized as float (0.0)
+        # so they can be formatted correctly if passed into dialog data.
+        dialog_data = {
+            'prod_id': self.production_form_id_combo.currentText().strip(),
+            'quantity_required_kg': 0.0,
+            'remaining_quantity': 0.0
+        }
         dialog = AddItemDialog(self, db_engine=self.engine, data=dialog_data)
         if dialog.exec(): self._add_item_to_table(dialog.get_data())
 
@@ -766,9 +1011,11 @@ class OutgoingFormPage(QWidget):
             QMessageBox.warning(self, "Selection Error", "Please select an item to edit.")
             return
 
+        # Need to retrieve raw numerical values from the table (by cleaning commas)
         def get_float_from_item(row, col):
             try:
-                return float(self.entry_items_table.item(row, col).text().replace(',', ''))
+                text = self.entry_items_table.item(row, col).text().replace(',', '')
+                return float(text)
             except (AttributeError, ValueError):
                 return 0.0
 
@@ -791,6 +1038,7 @@ class OutgoingFormPage(QWidget):
         selected_row = self.entry_items_table.currentRow()
         if selected_row >= 0:
             self.entry_items_table.removeRow(selected_row)
+            self.show_notification("Item removed from the list.", 'info')
         else:
             QMessageBox.warning(self, "Selection Error", "Please select an item to remove.")
 
@@ -804,39 +1052,48 @@ class OutgoingFormPage(QWidget):
                 "box_number", "remaining_quantity", "quantity_produced", "warehouse"]
         for col, key in enumerate(keys):
             value = data.get(key)
+
             is_qty = key in ["quantity_required_kg", "remaining_quantity"]
-            text_val = format_float_with_commas(value) if is_qty else str(value or '')
+
+            if is_qty:
+                # Apply comma formatting for quantities
+                text_val = format_float_with_commas(value)
+            else:
+                # Standard conversion for non-numeric fields
+                text_val = str(value or '')
+
             item = QTableWidgetItem(text_val)
-            if is_qty: item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            if is_qty:
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
             self.entry_items_table.setItem(row, col, item)
 
     def _fetch_production_details(self):
         form_id = self.production_form_id_combo.currentText().strip()
-        if not form_id:
-            QMessageBox.warning(self, "Input Error", "Please enter a Prod'n Form ID# to fetch details.")
-            return
-        if self.entry_items_table.rowCount() > 0:
-            reply = QMessageBox.question(self, "Confirm Overwrite",
-                                         "Fetching new details will overwrite the current item list. Are you sure?",
-                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.No: return
+        if not form_id: QMessageBox.warning(self, "Input Error",
+                                            "Please enter a Prod'n Form ID# to fetch details."); return
         try:
             with self.engine.connect() as conn:
                 query = text(
                     "SELECT prod_id, prod_code, lot_number, qty_prod FROM legacy_production WHERE prod_id = :form_id")
                 results = conn.execute(query, {"form_id": form_id}).mappings().all()
             if not results:
-                QMessageBox.warning(self, "Not Found", f"No production details found for ID# {form_id}.")
+                self.show_notification(f"No production details found for ID# {form_id}.", 'warning')
                 return
             self.entry_items_table.setRowCount(0)
             for rec in results:
+                # Ensure we pass the raw float/decimal value here, relying on _add_item_to_table to format it
                 self._add_item_to_table({"prod_id": rec.get('prod_id'), "product_code": rec.get('prod_code'),
                                          "lot_used": rec.get('lot_number'),
                                          "quantity_required_kg": float(rec.get('qty_prod') or 0.0),
-                                         "remaining_quantity": 0.0})
-            QMessageBox.information(self, "Success", f"Fetched {len(results)} items for ID# {form_id}.")
+                                         "remaining_quantity": 0.0  # Default for new entry
+                                         })
+            self.show_notification(f"Fetched {len(results)} items for ID# {form_id}.", 'success')
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Could not fetch details: {e}")
+            self.show_notification("Failed to fetch production details.", 'error')
 
     def _refresh_all_data_views(self):
         self._load_all_records()
@@ -850,29 +1107,30 @@ class OutgoingFormPage(QWidget):
             "activity": self.activity_edit.text().strip(), "released_by": self.released_by_combo.currentText(),
             "user": self.username
         }
-        if not all([primary_data['production_form_id'], primary_data['released_by']]):
-            QMessageBox.warning(self, "Input Error", "Prod'n Form ID# and Released By are required fields.")
+        if not all([primary_data['production_form_id'], primary_data['ref_no'], primary_data['released_by']]):
+            QMessageBox.warning(self, "Input Error", "Prod'n Form ID#, Ref#, and Released By are required fields.")
             return
-
         items_data = []
         for row in range(self.entry_items_table.rowCount()):
-            def parse_qty(col):
+            def parse_qty_from_table(col_index):
                 try:
-                    return float(self.entry_items_table.item(row, col).text().replace(',', ''))
-                except:
+                    text = self.entry_items_table.item(row, col_index).text().replace(',', '')
+                    return float(text)
+                except (AttributeError, ValueError):
                     return 0.0
 
             items_data.append({
                 "prod_id": self.entry_items_table.item(row, 0).text(),
                 "product_code": self.entry_items_table.item(row, 1).text(),
-                "lot_used": self.entry_items_table.item(row, 2).text(), "quantity_required_kg": parse_qty(3),
+                "lot_used": self.entry_items_table.item(row, 2).text(),
+                "quantity_required_kg": parse_qty_from_table(3),
                 "new_lot_details": self.entry_items_table.item(row, 4).text(),
                 "status": self.entry_items_table.item(row, 5).text(),
-                "box_number": self.entry_items_table.item(row, 6).text(), "remaining_quantity": parse_qty(7),
+                "box_number": self.entry_items_table.item(row, 6).text(),
+                "remaining_quantity": parse_qty_from_table(7),
                 "quantity_produced": self.entry_items_table.item(row, 8).text(),
                 "warehouse": self.entry_items_table.item(row, 9).text()
             })
-
         try:
             with self.engine.connect() as conn, conn.begin():
                 if self.current_editing_primary_id:
@@ -893,118 +1151,77 @@ class OutgoingFormPage(QWidget):
                         "INSERT INTO outgoing_records_items (primary_id, prod_id, product_code, lot_used, quantity_required_kg, new_lot_details, status, box_number, remaining_quantity, quantity_produced, warehouse) VALUES (:primary_id, :prod_id, :product_code, :lot_used, :quantity_required_kg, :new_lot_details, :status, :box_number, :remaining_quantity, :quantity_produced, :warehouse)")
                     conn.execute(items_sql, items_data)
 
-                conn.execute(text("DELETE FROM transactions WHERE source_ref_no LIKE :ref"),
-                             {"ref": f"OF-{primary_id}-%"})
-                conn.execute(text("DELETE FROM failed_transactions WHERE source_ref_no LIKE :ref"),
-                             {"ref": f"OF-{primary_id}-%"})
+                # --- TRANSACTION HANDLING (MODIFIED) ---
+                ref_no = f"OF-{primary_id}"
+                if self.current_editing_primary_id:
+                    conn.execute(text(
+                        "DELETE FROM transactions WHERE transaction_type = 'OUTGOING_FORM' AND source_ref_no = :ref"),
+                        {"ref": ref_no})
+                    conn.execute(text(
+                        "DELETE FROM failed_transactions WHERE transaction_type = 'OUTGOING_FORM' AND source_ref_no = :ref"),
+                        {"ref": ref_no})
 
-                transaction_records, failed_transaction_records = [], []
+                transaction_records = []
+                failed_transaction_records = []
 
-                for idx, item in enumerate(items_data):
-                    qty_req = item.get('quantity_required_kg', 0)
-                    if not qty_req > 0: continue
+                for item in items_data:
+                    lot_used_input = item['lot_used']
 
-                    source_ref_no = f"OF-{primary_id}-{idx + 1}"
-                    target_list = transaction_records if item.get('status') == 'PASSED' else failed_transaction_records
+                    # FIX: Calling self._parse_lot_range, which is now correctly defined here.
+                    lots_to_process = self._parse_lot_range(lot_used_input) if '-' in lot_used_input else [
+                        lot_used_input]
 
-                    if item.get('quantity_produced', '').strip().upper() == 'COMPLETION':
-                        lot_used_input, new_lot_input = item['lot_used'], item['new_lot_details']
-                        if not all([lot_used_input, new_lot_input]): continue
+                    if lots_to_process is None:
+                        raise ValueError(f"Invalid lot range format for '{lot_used_input}'. Cannot save.")
+                    if not lots_to_process or item['quantity_required_kg'] <= 0:
+                        continue
 
-                        lots_to_debit = self._parse_lot_range(lot_used_input) if '-' in lot_used_input else [
-                            lot_used_input]
-                        new_lots_to_credit = self._parse_lot_range(new_lot_input) if '-' in new_lot_input else [
-                            new_lot_input]
-                        if lots_to_debit is None or new_lots_to_credit is None: raise ValueError(
-                            "Invalid lot range format.")
+                    qty_per_lot = Decimal(item['quantity_required_kg']) / Decimal(len(lots_to_process))
+                    for single_lot in lots_to_process:
+                        record_data = {
+                            "transaction_date": primary_data["date_out"], "transaction_type": "OUTGOING_FORM",
+                            "source_ref_no": ref_no, "product_code": item["product_code"],
+                            "lot_number": single_lot, "quantity_in": 0,
+                            "quantity_out": qty_per_lot.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP),
+                            "unit": "KG.", "warehouse": item["warehouse"], "encoded_by": self.username,
+                        }
+                        if item['status'] == 'FAILED':
+                            record_data[
+                                "remarks"] = f"FAILED - Outgoing Form {primary_data['ref_no']}: For activity {primary_data['activity']}"
+                            failed_transaction_records.append(record_data)
+                        else:
+                            record_data[
+                                "remarks"] = f"Outgoing Form {primary_data['ref_no']}: Consumed for activity {primary_data['activity']}"
+                            transaction_records.append(record_data)
 
-                        qty_per_debit = (Decimal(qty_req) / Decimal(len(lots_to_debit))).quantize(Decimal('0.0001'),
-                                                                                                  rounding=ROUND_HALF_UP)
-                        qty_per_credit = (Decimal(qty_req) / Decimal(len(new_lots_to_credit))).quantize(
-                            Decimal('0.0001'), rounding=ROUND_HALF_UP)
+                if transaction_records:
+                    conn.execute(text("""
+                        INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, 
+                            lot_number, quantity_in, quantity_out, unit, warehouse, encoded_by, remarks) 
+                        VALUES (:transaction_date, :transaction_type, :source_ref_no, :product_code, 
+                            :lot_number, :quantity_in, :quantity_out, :unit, :warehouse, :encoded_by, :remarks)
+                    """), transaction_records)
 
-                        for lot in lots_to_debit:
-                            target_list.append(
-                                {"transaction_date": primary_data["date_out"], "transaction_type": "REPROCESSING-OUT",
-                                 "source_ref_no": source_ref_no, "product_code": item["product_code"],
-                                 "lot_number": lot, "quantity_in": 0, "quantity_out": qty_per_debit, "unit": "KG.",
-                                 "warehouse": item["warehouse"], "encoded_by": self.username,
-                                 "remarks": f"Consumed for new lot(s) {new_lot_input}"})
-                        for lot in new_lots_to_credit:
-                            target_list.append(
-                                {"transaction_date": primary_data["date_out"], "transaction_type": "REPROCESSING-IN",
-                                 "source_ref_no": source_ref_no, "product_code": item["product_code"],
-                                 "lot_number": lot, "quantity_in": qty_per_credit, "quantity_out": 0, "unit": "KG.",
-                                 "warehouse": item["warehouse"], "encoded_by": self.username,
-                                 "remarks": f"Produced from old lot(s) {lot_used_input}"})
-                    else:
-                        lot_used_input = item['lot_used']
-                        if not lot_used_input: continue
+                if failed_transaction_records:
+                    conn.execute(text("""
+                        INSERT INTO failed_transactions (transaction_date, transaction_type, source_ref_no, product_code, 
+                            lot_number, quantity_in, quantity_out, unit, warehouse, encoded_by, remarks) 
+                        VALUES (:transaction_date, :transaction_type, :source_ref_no, :product_code, 
+                            :lot_number, :quantity_in, :quantity_out, :unit, :warehouse, :encoded_by, :remarks)
+                    """), failed_transaction_records)
 
-                        lots_to_debit = self._parse_lot_range(lot_used_input) if '-' in lot_used_input else [
-                            lot_used_input]
-                        if lots_to_debit is None: raise ValueError("Invalid lot range format.")
-
-                        qty_per_lot = (Decimal(qty_req) / Decimal(len(lots_to_debit))).quantize(Decimal('0.0001'),
-                                                                                                rounding=ROUND_HALF_UP)
-
-                        for lot in lots_to_debit:
-                            target_list.append(
-                                {"transaction_date": primary_data["date_out"], "transaction_type": "OUTGOING_FORM",
-                                 "source_ref_no": source_ref_no, "product_code": item["product_code"],
-                                 "lot_number": lot, "quantity_in": 0, "quantity_out": qty_per_lot, "unit": "KG.",
-                                 "warehouse": item["warehouse"], "encoded_by": self.username,
-                                 "remarks": f"Outgoing for: {primary_data['activity']}"})
-
-                if transaction_records: conn.execute(text(
-                    """INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, warehouse, encoded_by, remarks) VALUES (:transaction_date, :transaction_type, :source_ref_no, :product_code, :lot_number, :quantity_in, :quantity_out, :unit, :warehouse, :encoded_by, :remarks)"""),
-                    transaction_records)
-                if failed_transaction_records: conn.execute(text(
-                    """INSERT INTO failed_transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, warehouse, encoded_by, remarks) VALUES (:transaction_date, :transaction_type, :source_ref_no, :product_code, :lot_number, :quantity_in, :quantity_out, :unit, :warehouse, :encoded_by, :remarks)"""),
-                    failed_transaction_records)
-
-                self._save_new_combobox_entries(conn, primary_data, items_data)
                 self.log_audit_trail(log_action,
                                      f"{action.capitalize()} form with Prod'n ID: {primary_data['production_form_id']}")
-                QMessageBox.information(self, "Success", f"Form has been {action} successfully.")
+                self.show_notification(f"Form has been {action} successfully.", 'success')
 
-                # --- MODIFICATION START ---
-                # Clear the items table but retain all primary form details, including Ref#,
-                # for faster entry of sequential forms. The user can manually change any field.
-                self.entry_items_table.setRowCount(0)
-                self.production_form_id_combo.setFocus()  # Set focus to the first field for a new series
-
-                # If the form was in update mode, reset its state to 'new entry' mode.
-                if self.current_editing_primary_id is not None:
-                    self.current_editing_primary_id = None
-                    self.cancel_update_btn.hide()
-                    self.save_btn.setText("Save Form")
-                    self.save_btn.setIcon(fa.icon('fa5s.save', color=COLOR_PRIMARY))
-                # --- MODIFICATION END ---
-
-                # Refresh other tabs and reload combobox data
+                self.current_editing_primary_id = None
+                self._clear_form()
                 self._refresh_all_data_views()
-                self._load_combobox_data()
 
         except Exception as e:
             QMessageBox.critical(self, "Database Error",
                                  f"An error occurred while saving: {e}\n\n{traceback.format_exc()}")
-
-    def _save_new_combobox_entries(self, conn, primary_data: Dict, items_data: List[Dict]):
-        """Saves new, user-typed values from editable combo boxes to the database."""
-        new_releaser = primary_data['released_by']
-        if new_releaser and new_releaser not in self.releasers_cache:
-            conn.execute(text("INSERT INTO outgoing_releasers (name) VALUES (:name) ON CONFLICT (name) DO NOTHING"),
-                         {"name": new_releaser})
-
-        new_qty_prod_options: Set[str] = {
-            item['quantity_produced'] for item in items_data
-            if item.get('quantity_produced') and item['quantity_produced'] not in self.qty_produced_options_cache
-        }
-        if new_qty_prod_options:
-            conn.execute(text(
-                "INSERT INTO outgoing_qty_produced_options (value) VALUES (:value) ON CONFLICT (value) DO NOTHING"),
-                [{"value": opt} for opt in new_qty_prod_options])
+            self.show_notification("Error saving form. See dialog for details.", 'error')
 
     def _load_record_for_update(self):
         row = self.records_table.currentRow()
@@ -1025,30 +1242,32 @@ class OutgoingFormPage(QWidget):
             self.activity_edit.setText(primary_rec.get('activity', ''))
             self.released_by_combo.setCurrentText(primary_rec.get('released_by', ''))
             self.entry_items_table.setRowCount(0)
+
+            # Use raw data from DB to populate the table (which handles formatting internally)
             for item in item_recs: self._add_item_to_table(item)
+
+            # Update Save button text and icon for update context
             self.save_btn.setText("Update Form")
             self.save_btn.setIcon(fa.icon('fa5s.edit', color=COLOR_PRIMARY))
+
             self.cancel_update_btn.show()
             self.tab_widget.setCurrentWidget(self.entry_tab)
-            QMessageBox.information(self, "Record Loaded",
-                                    f"Record #{primary_id} has been loaded into the form for updating.")
+            self.show_notification(f"Record #{primary_id} loaded for update.", 'info')
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not load record for update: {e}")
+            self.show_notification(f"Failed to load record #{primary_id} for update.", 'error')
             self._clear_form()
 
     def _manage_releasers_list(self):
         dialog = ManageListDialog(self, self.engine, "outgoing_releasers", "name", "Manage Releasers")
-        if dialog.exec():
-            self._load_combobox_data()
-            QMessageBox.information(self, "List Updated", "The releasers list has been updated.")
+        dialog.exec()
+        self._load_combobox_data()
+        self.show_notification("Releasers list updated.", 'info')
 
     def _load_combobox_data(self):
         try:
             with self.engine.connect() as conn:
-                self.releasers_cache = conn.execute(
-                    text("SELECT name FROM outgoing_releasers ORDER BY name")).scalars().all()
-                self.qty_produced_options_cache = conn.execute(
-                    text("SELECT value FROM outgoing_qty_produced_options ORDER BY value")).scalars().all()
+                releasers = conn.execute(text("SELECT name FROM outgoing_releasers ORDER BY name")).scalars().all()
                 prod_ids_from_db = conn.execute(text(
                     "SELECT DISTINCT prod_id FROM legacy_production WHERE prod_id IS NOT NULL AND prod_id != ''")).scalars().all()
 
@@ -1059,14 +1278,12 @@ class OutgoingFormPage(QWidget):
                     return -1
 
             prod_ids = sorted(prod_ids_from_db, key=sort_key, reverse=True)
-
             current_releaser = self.released_by_combo.currentText()
             self.released_by_combo.blockSignals(True)
             self.released_by_combo.clear()
-            self.released_by_combo.addItems([""] + self.releasers_cache)
+            self.released_by_combo.addItems([""] + releasers)
             self.released_by_combo.setCurrentText(current_releaser)
             self.released_by_combo.blockSignals(False)
-
             current_prod_id = self.production_form_id_combo.currentText()
             self.production_form_id_combo.blockSignals(True)
             self.production_form_id_combo.clear()
@@ -1075,6 +1292,7 @@ class OutgoingFormPage(QWidget):
             self.production_form_id_combo.blockSignals(False)
         except Exception as e:
             QMessageBox.critical(self, "DB Error", f"Could not load dropdown data: {e}")
+            self.show_notification("Failed to load dropdown data.", 'error')
 
     def _on_search_text_changed(self, text):
         self.current_page = 1
@@ -1127,6 +1345,7 @@ class OutgoingFormPage(QWidget):
             self._on_record_selection_changed()
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to load records: {e}")
+            self.show_notification("Failed to load outgoing records.", 'error')
 
     def _populate_records_table(self, table, headers, data):
         table.setRowCount(0)
@@ -1184,20 +1403,37 @@ class OutgoingFormPage(QWidget):
                 for row_idx, record in enumerate(items):
                     for col_idx, key in enumerate(item_keys):
                         value = record.get(key, '')
+
                         is_qty = key in ["quantity_required_kg", "remaining_quantity"]
-                        text_val = format_float_with_commas(value) if is_qty else str(value or '')
+
+                        if is_qty:
+                            # Apply comma formatting for display
+                            text_val = format_float_with_commas(value)
+                        else:
+                            text_val = str(value or '')
+
                         item = QTableWidgetItem(text_val)
-                        if is_qty: item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+                        if is_qty:
+                            item.setTextAlignment(
+                                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
                         self.view_items_table.setItem(row_idx, col_idx, item)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not load details:\n{e}\n\n{traceback.format_exc()}")
+            self.show_notification(f"Error loading details for record #{primary_id}.", 'error')
 
     def _delete_record(self):
         row = self.records_table.currentRow()
         if row < 0: return
         primary_id = int(self.records_table.item(row, 0).text())
         prod_id = self.records_table.item(row, 1).text()
-
+        password, ok = QInputDialog.getText(self, "Admin Authentication", "Enter Admin Password:",
+                                            QLineEdit.EchoMode.Password)
+        if not ok: return
+        if password != "ADMIN_PASSWORD":
+            QMessageBox.warning(self, "Authentication Failed", "Incorrect password. Deletion cancelled.")
+            return
         reply = QMessageBox.question(self, "Confirm Deletion",
                                      f"Are you sure you want to delete form with Prod'n ID <b>{prod_id}</b>?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1208,16 +1444,23 @@ class OutgoingFormPage(QWidget):
                     conn.execute(text(
                         "UPDATE outgoing_records_primary SET is_deleted = TRUE, edited_by = :user, edited_on = NOW() WHERE id = :id"),
                         {"id": primary_id, "user": self.username})
-                    conn.execute(text("DELETE FROM transactions WHERE source_ref_no LIKE :ref"),
-                                 {"ref": f"OF-{primary_id}-%"})
-                    conn.execute(text("DELETE FROM failed_transactions WHERE source_ref_no LIKE :ref"),
-                                 {"ref": f"OF-{primary_id}-%"})
+
+                    ref_no = f"OF-{primary_id}"
+                    # MODIFIED: Delete from both transaction tables
+                    conn.execute(text(
+                        "DELETE FROM transactions WHERE transaction_type = 'OUTGOING_FORM' AND source_ref_no = :ref"),
+                        {"ref": ref_no})
+                    conn.execute(text(
+                        "DELETE FROM failed_transactions WHERE transaction_type = 'OUTGOING_FORM' AND source_ref_no = :ref"),
+                        {"ref": ref_no})
+
                 self.log_audit_trail("DELETE_OUTGOING_FORM",
                                      f"Soft-deleted form {prod_id} and its inventory transactions")
-                QMessageBox.information(self, "Success", f"Form {prod_id} has been moved to Deleted Records.")
+                self.show_notification(f"Form {prod_id} moved to Deleted Records.", 'success')
                 self._refresh_all_data_views()
             except Exception as e:
                 QMessageBox.critical(self, "Database Error", f"Failed to delete record: {e}")
+                self.show_notification("Error deleting record. See dialog for details.", 'error')
 
     def _restore_record(self):
         row = self.deleted_records_table.currentRow()
@@ -1239,72 +1482,58 @@ class OutgoingFormPage(QWidget):
                     items_data = conn.execute(text("SELECT * FROM outgoing_records_items WHERE primary_id = :id"),
                                               {"id": primary_id}).mappings().all()
 
-                    transaction_records, failed_transaction_records = [], []
-                    for idx, item in enumerate(items_data):
-                        qty_req = item.get('quantity_required_kg', 0)
-                        if not qty_req > 0: continue
+                    # --- MODIFIED: Transaction handling for restore ---
+                    transaction_records = []
+                    failed_transaction_records = []
 
-                        source_ref_no = f"OF-{primary_id}-{idx + 1}"
-                        target_list = transaction_records if item.get(
-                            'status') == 'PASSED' else failed_transaction_records
+                    for item in items_data:
+                        lot_used_input = item['lot_used']
 
-                        if item.get('quantity_produced', '').strip().upper() == 'COMPLETION':
-                            lot_used_input, new_lot_input = item['lot_used'], item['new_lot_details']
-                            if not all([lot_used_input, new_lot_input]): continue
+                        # FIX: Calling self._parse_lot_range
+                        lots_to_process = self._parse_lot_range(lot_used_input) if '-' in lot_used_input else [
+                            lot_used_input]
 
-                            lots_to_debit = self._parse_lot_range(lot_used_input) if '-' in lot_used_input else [
-                                lot_used_input]
-                            new_lots_to_credit = self._parse_lot_range(new_lot_input) if '-' in new_lot_input else [
-                                new_lot_input]
-                            if lots_to_debit is None or new_lots_to_credit is None: continue
+                        if lots_to_process is None or not item['quantity_required_kg'] > 0:
+                            continue
 
-                            qty_per_debit = (Decimal(qty_req) / Decimal(len(lots_to_debit))).quantize(Decimal('0.0001'),
-                                                                                                      rounding=ROUND_HALF_UP)
-                            qty_per_credit = (Decimal(qty_req) / Decimal(len(new_lots_to_credit))).quantize(
-                                Decimal('0.0001'), rounding=ROUND_HALF_UP)
+                        qty_per_lot = Decimal(item['quantity_required_kg']) / Decimal(len(lots_to_process))
+                        for single_lot in lots_to_process:
+                            record_data = {
+                                "transaction_date": primary_data["date_out"], "transaction_type": "OUTGOING_FORM",
+                                "source_ref_no": f"OF-{primary_id}", "product_code": item["product_code"],
+                                "lot_number": single_lot, "quantity_in": 0,
+                                "quantity_out": qty_per_lot.quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP),
+                                "unit": "KG.", "warehouse": item.get("warehouse"), "encoded_by": self.username,
+                            }
+                            if item['status'] == 'FAILED':
+                                record_data["remarks"] = f"RESTORED FAILED - Outgoing Form {primary_data['ref_no']}"
+                                failed_transaction_records.append(record_data)
+                            else:
+                                record_data["remarks"] = f"RESTORED - Outgoing Form {primary_data['ref_no']}"
+                                transaction_records.append(record_data)
 
-                            for lot in lots_to_debit: target_list.append(
-                                {"transaction_date": primary_data["date_out"], "transaction_type": "REPROCESSING-OUT",
-                                 "source_ref_no": source_ref_no, "product_code": item["product_code"],
-                                 "lot_number": lot, "quantity_in": 0, "quantity_out": qty_per_debit, "unit": "KG.",
-                                 "warehouse": item["warehouse"], "encoded_by": self.username,
-                                 "remarks": f"RESTORED - Consumed for new lot(s) {new_lot_input}"})
-                            for lot in new_lots_to_credit: target_list.append(
-                                {"transaction_date": primary_data["date_out"], "transaction_type": "REPROCESSING-IN",
-                                 "source_ref_no": source_ref_no, "product_code": item["product_code"],
-                                 "lot_number": lot, "quantity_in": qty_per_credit, "quantity_out": 0, "unit": "KG.",
-                                 "warehouse": item["warehouse"], "encoded_by": self.username,
-                                 "remarks": f"RESTORED - Produced from old lot(s) {lot_used_input}"})
-                        else:
-                            lot_used_input = item['lot_used']
-                            if not lot_used_input: continue
+                    if transaction_records:
+                        conn.execute(text("""
+                            INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, 
+                                quantity_in, quantity_out, unit, warehouse, encoded_by, remarks) 
+                            VALUES (:transaction_date, :transaction_type, :source_ref_no, :product_code, :lot_number, 
+                                :quantity_in, :quantity_out, :unit, :warehouse, :encoded_by, :remarks)
+                        """), transaction_records)
 
-                            lots_to_debit = self._parse_lot_range(lot_used_input) if '-' in lot_used_input else [
-                                lot_used_input]
-                            if lots_to_debit is None: continue
-
-                            qty_per_lot = (Decimal(qty_req) / Decimal(len(lots_to_debit))).quantize(Decimal('0.0001'),
-                                                                                                    rounding=ROUND_HALF_UP)
-
-                            for lot in lots_to_debit: target_list.append(
-                                {"transaction_date": primary_data["date_out"], "transaction_type": "OUTGOING_FORM",
-                                 "source_ref_no": source_ref_no, "product_code": item["product_code"],
-                                 "lot_number": lot, "quantity_in": 0, "quantity_out": qty_per_lot, "unit": "KG.",
-                                 "warehouse": item["warehouse"], "encoded_by": self.username,
-                                 "remarks": f"RESTORED - Outgoing for: {primary_data['activity']}"})
-
-                    if transaction_records: conn.execute(text(
-                        """INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, warehouse, encoded_by, remarks) VALUES (:transaction_date, :transaction_type, :source_ref_no, :product_code, :lot_number, :quantity_in, :quantity_out, :unit, :warehouse, :encoded_by, :remarks)"""),
-                        transaction_records)
-                    if failed_transaction_records: conn.execute(text(
-                        """INSERT INTO failed_transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, warehouse, encoded_by, remarks) VALUES (:transaction_date, :transaction_type, :source_ref_no, :product_code, :lot_number, :quantity_in, :quantity_out, :unit, :warehouse, :encoded_by, :remarks)"""),
-                        failed_transaction_records)
+                    if failed_transaction_records:
+                        conn.execute(text("""
+                            INSERT INTO failed_transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, 
+                                quantity_in, quantity_out, unit, warehouse, encoded_by, remarks) 
+                            VALUES (:transaction_date, :transaction_type, :source_ref_no, :product_code, :lot_number, 
+                                :quantity_in, :quantity_out, :unit, :warehouse, :encoded_by, :remarks)
+                        """), failed_transaction_records)
 
                 self.log_audit_trail("RESTORE_OUTGOING_FORM", f"Restored form {prod_id} and its inventory transactions")
-                QMessageBox.information(self, "Success", f"Form {prod_id} has been restored.")
+                self.show_notification(f"Form {prod_id} has been restored.", 'success')
                 self._refresh_all_data_views()
             except Exception as e:
                 QMessageBox.critical(self, "Database Error", f"Failed to restore record: {e}")
+                self.show_notification("Error restoring record. See dialog for details.", 'error')
 
     def _load_deleted_records(self):
         search_term = self.deleted_search_edit.text().strip()
@@ -1322,3 +1551,4 @@ class OutgoingFormPage(QWidget):
             self._populate_records_table(self.deleted_records_table, headers, results)
         except Exception as e:
             QMessageBox.critical(self, "Database Error", f"Failed to load deleted records: {e}")
+            self.show_notification("Failed to load deleted records.", 'error')

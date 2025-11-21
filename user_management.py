@@ -38,28 +38,40 @@ class UserManagementPage(QWidget):
         self.engine = db_engine
         self.current_username = current_username
         self.log_audit_trail = log_audit_trail_func
-
         self.current_editing_user_id = None
         self.load_thread = None
-        self._setup_ui()
-        self.refresh_page()
 
+        # MODIFICATION 1: Determine the role of the current user upon initialization.
+        self.current_user_role = 'Viewer'  # Default to the most restrictive role for safety
+        try:
+            with self.engine.connect() as conn:
+                role = conn.execute(text("SELECT role FROM users WHERE username = :user"),
+                                    {"user": self.current_username}).scalar_one_or_none()
+                if role:
+                    self.current_user_role = role
+        except Exception as e:
+            # Log this error in a real application
+            print(f"Warning: Could not determine role for '{self.current_username}'. Defaulting to Viewer. Error: {e}")
+
+        self._setup_ui()
+        # MODIFICATION 2: Apply permissions based on the user's role after the UI is built.
+        self._apply_permissions()
+
+        self.refresh_page()
         self.setStyleSheet(self._get_styles())
 
     def _create_instruction_box(self, text):
         instruction_box = QGroupBox("Instructions")
         instruction_box.setObjectName("InstructionsBox")
         instruction_layout = QHBoxLayout(instruction_box)
-        # ADJUSTMENT 1: Tighter margins for the instruction box content
         instruction_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Icon (Using info-circle, typically blue/cyan)
         icon_label = QLabel()
         icon_label.setPixmap(fa.icon('fa5s.info-circle', color='#17A2B8').pixmap(QSize(24, 24)))
 
         text_edit = QTextEdit(text, objectName="InstructionsText")
         text_edit.setReadOnly(True)
-        text_edit.setMaximumHeight(60)  # Keeping the reduced height
+        text_edit.setMaximumHeight(60)
         text_edit.setFrameShape(QTextEdit.Shape.NoFrame)
 
         instruction_layout.addWidget(icon_label)
@@ -97,6 +109,12 @@ class UserManagementPage(QWidget):
             #DestructiveButton {{ background-color: #dc3545; color: white; border-radius: 4px; padding: 5px; }}
             #DestructiveButton:hover {{ background-color: #c82333; }}
 
+            /* Disabled styles for Viewer mode */
+            QPushButton:disabled, QLineEdit:disabled, QComboBox:disabled, QCheckBox:disabled {{
+                background-color: #f0f0f0;
+                color: #a0a0a0;
+            }}
+
             /* Table */
             QTableWidget {{ border: none; background-color: white; }}
             QTableWidget::item:selected {{
@@ -108,7 +126,7 @@ class UserManagementPage(QWidget):
             QGroupBox#InstructionsBox {{
                 border: 1px solid #17A2B8; 
                 background-color: #f7faff; 
-                margin-top: 5px; /* Reduced vertical spacing */
+                margin-top: 5px; 
                 padding-top: 15px;
             }} 
             QGroupBox#InstructionsBox::title {{ 
@@ -123,14 +141,12 @@ class UserManagementPage(QWidget):
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
-        # ADJUSTMENT 2: Tighter main layout margins and spacing
         main_layout.setContentsMargins(10, 10, 10, 10)
         main_layout.setSpacing(8)
 
         # --- 1. Structured Header ---
         header_widget = QWidget(objectName="HeaderWidget")
         header_layout = QHBoxLayout(header_widget)
-        # ADJUSTMENT 3: Tighter margin below header
         header_layout.setContentsMargins(0, 0, 0, 5)
 
         icon_pixmap = fa.icon('fa5s.users', color=self.HEADER_COLOR).pixmap(QSize(28, 28))
@@ -144,20 +160,22 @@ class UserManagementPage(QWidget):
         main_layout.addWidget(header_widget)
 
         # --- 2. Instructions Box ---
-        instructions = self._create_instruction_box(
-            "Use this form to manage user accounts. Double-click an existing user in the table or use 'Load Selected User' to modify their role or password. The Username cannot be changed after creation."
-        )
+        # MODIFICATION 3: Display different instructions based on user role.
+        if self.current_user_role == 'Viewer':
+            instruction_text = "You are in viewing-only mode. You can see the list of users, but you cannot add, edit, or delete accounts."
+        else:
+            instruction_text = "Use this form to manage user accounts. Double-click an existing user in the table or use 'Load Selected User' to modify their role or password. The Username cannot be changed after creation."
+
+        instructions = self._create_instruction_box(instruction_text)
         main_layout.addWidget(instructions)
 
         # --- 3. Existing Users Table (STRETCHED) ---
         table_group = QGroupBox("Existing Users")
         table_layout = QVBoxLayout()
-        table_layout.setContentsMargins(10, 10, 10, 10)  # Tighter groupbox padding
+        table_layout.setContentsMargins(10, 10, 10, 10)
 
         self.table_stack = QStackedWidget()
         self.users_table = QTableWidget()
-
-        # ... (table setup remains the same) ...
         self.users_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.users_table.setShowGrid(False)
         self.users_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -176,10 +194,10 @@ class UserManagementPage(QWidget):
         table_group.setLayout(table_layout)
 
         # --- 4. Form Group (COMPACT) ---
-        form_group = QGroupBox("Add / Edit User")
+        self.form_group = QGroupBox("Add / Edit User")
         self.form_layout = QFormLayout()
-        self.form_layout.setContentsMargins(10, 10, 10, 10)  # Tighter form group padding
-        self.form_layout.setSpacing(5)  # Tighter spacing in form
+        self.form_layout.setContentsMargins(10, 10, 10, 10)
+        self.form_layout.setSpacing(5)
         self.form_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         self.form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
@@ -190,7 +208,8 @@ class UserManagementPage(QWidget):
         self.confirm_password_edit = QLineEdit()
         self.confirm_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.role_combo = QComboBox()
-        self.role_combo.addItems(["Editor", "Admin"])
+        # MODIFICATION 4: Add "Viewer" to the list of available roles.
+        self.role_combo.addItems(["Viewer", "Editor", "Admin"])
         self.qc_access_check = QCheckBox("Has WH Program Access")
 
         self.form_layout.addRow("Username:", self.username_edit)
@@ -198,7 +217,7 @@ class UserManagementPage(QWidget):
         self.form_layout.addRow("Confirm Password:", self.confirm_password_edit)
         self.form_layout.addRow("Role:", self.role_combo)
         self.form_layout.addRow(self.qc_access_check)
-        form_group.setLayout(self.form_layout)
+        self.form_group.setLayout(self.form_layout)
 
         self.load_btn = QPushButton("Load Selected User")
         self.save_btn = QPushButton("Save New User")
@@ -217,10 +236,9 @@ class UserManagementPage(QWidget):
         bottom_button_layout.addWidget(self.clear_btn)
         bottom_button_layout.addWidget(self.save_btn)
 
-        # Apply stretch factor 1 to the table group
         main_layout.addWidget(table_group, 1)
         main_layout.addLayout(top_button_layout)
-        main_layout.addWidget(form_group)
+        main_layout.addWidget(self.form_group)
         main_layout.addLayout(bottom_button_layout)
 
         self.load_btn.clicked.connect(self._load_selected_user_to_form)
@@ -229,9 +247,33 @@ class UserManagementPage(QWidget):
         self.delete_btn.clicked.connect(self._delete_user)
         self.clear_btn.clicked.connect(self._clear_form)
 
+    # MODIFICATION 5: New method to disable UI elements for viewers.
+    def _apply_permissions(self):
+        """Disables UI controls if the current user has a 'Viewer' role."""
+        if self.current_user_role == 'Viewer':
+            # Change the form title to indicate read-only status
+            self.form_group.setTitle("User Details (Viewing Only)")
+
+            # Disable all interactive form widgets
+            self.username_edit.setEnabled(False)
+            self.password_edit.setEnabled(False)
+            self.confirm_password_edit.setEnabled(False)
+            self.role_combo.setEnabled(False)
+            self.qc_access_check.setEnabled(False)
+
+            # Disable all action buttons
+            self.load_btn.setEnabled(False)
+            self.save_btn.setEnabled(False)
+            self.delete_btn.setEnabled(False)
+            self.clear_btn.setEnabled(False)
+
+            # Prevent loading user data into the form via double-click
+            self.users_table.doubleClicked.disconnect(self._load_selected_user_to_form)
+
     def refresh_page(self):
         self._load_users_async()
-        self._clear_form()
+        if self.current_user_role != 'Viewer':
+            self._clear_form()
 
     def _load_users_async(self):
         self.table_stack.setCurrentWidget(self.loading_label)
@@ -322,7 +364,6 @@ class UserManagementPage(QWidget):
                 with conn.begin() as transaction:
                     if self.current_editing_user_id:
                         if password:
-                            # IMPORTANT: In a real app, hash the password here (e.g., using bcrypt)
                             conn.execute(text(
                                 "UPDATE users SET password = :pwd, role = :role, qc_access = :access WHERE id = :id"),
                                 {"pwd": password, "role": role, "access": has_access,
@@ -337,7 +378,6 @@ class UserManagementPage(QWidget):
                                               {"user": username}).scalar_one_or_none()
                         if exists: QMessageBox.critical(self, "Error",
                                                         f"Username '{username}' already exists."); transaction.rollback(); return
-                        # IMPORTANT: In a real app, hash the password here
                         conn.execute(text(
                             "INSERT INTO users (username, password, role, qc_access) VALUES (:user, :pwd, :role, :access)"),
                             {"user": username, "pwd": password, "role": role, "access": has_access})
@@ -388,11 +428,11 @@ def setup_in_memory_db_for_user_management():
             )
         """))
 
-        # Insert initial data
+        # MODIFICATION 6: Update demo data to include a 'Viewer' role.
         initial_users = [
             {'username': 'ADMIN', 'password': 'hashed_admin_pwd', 'role': 'Admin', 'qc_access': True},
             {'username': 'JANE_DOE', 'password': 'hashed_jane_pwd', 'role': 'Editor', 'qc_access': True},
-            {'username': 'VIEWER', 'password': 'hashed_viewer_pwd', 'role': 'Editor', 'qc_access': False},
+            {'username': 'VIEWER', 'password': 'hashed_viewer_pwd', 'role': 'Viewer', 'qc_access': False},
         ]
         conn.execute(text(
             "INSERT INTO users (username, password, role, qc_access) VALUES (:username, :password, :role, :qc_access) ON CONFLICT(username) DO NOTHING"
@@ -417,9 +457,20 @@ if __name__ == '__main__':
     main_window.resize(800, 650)
 
     # 3. Instantiate the Page
+    # --- MODIFICATION 7: Choose which user to test as. ---
+
+    # --- TEST AS ADMIN (Full Access) ---
+    # The form and all buttons will be enabled.
+    current_user_to_test = "ADMIN"
+
+    # --- TEST AS VIEWER (Read-Only) ---
+    # Uncomment the line below to test the viewer mode.
+    # The form and all buttons will be disabled.
+    # current_user_to_test = "VIEWER"
+
     user_page = UserManagementPage(
         db_engine=engine,
-        current_username="ADMIN",
+        current_username=current_user_to_test,
         log_audit_trail_func=mock_log_audit_trail
     )
     main_window.setCentralWidget(user_page)

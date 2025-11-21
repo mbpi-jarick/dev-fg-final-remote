@@ -64,6 +64,8 @@ try:
     from failed_transactions_form import FailedTransactionsFormPage
     from good_inventory_page import GoodInventoryPage
     from failed_inventory_report import FailedInventoryReportPage
+    from beginning_balance_editor import BeginningBalancePage
+    from failed_beginning_balance_editor import FailedBeginningBalancePage
 except ImportError as e:
     # print(f"Warning: Page import failed: {e}. If the application runs without issues, ignore this.")
     pass  # Suppressing verbose import warning if the structure assumes external files
@@ -97,6 +99,8 @@ except ImportError as e:
     if 'FailedTransactionsFormPage' not in locals(): FailedTransactionsFormPage = PlaceholderPage
     if 'GoodInventoryPage' not in locals(): GoodInventoryPage = PlaceholderPage
     if 'FailedInventoryReportPage' not in locals(): FailedInventoryReportPage = PlaceholderPage
+    if 'BeginningBalancePage' not in locals(): BeginningBalancePage = PlaceholderPage
+    if 'FailedBeginningBalancePage' not in locals(): FailedBeginningBalancePage = PlaceholderPage
 # ---------------------------------------
 
 
@@ -716,10 +720,8 @@ class SyncDeliveryWorker(QObject):
         if dr_num_raw is None:
             return None
         try:
-            # Handle cases where it might be a float like 10001.0
             return str(int(float(dr_num_raw)))
         except (ValueError, TypeError):
-            # Handle cases where it's already a string or something else
             return str(dr_num_raw).strip() if dr_num_raw else None
 
     def _to_float(self, value, default=0.0):
@@ -730,7 +732,6 @@ class SyncDeliveryWorker(QObject):
             return float(value)
         except (ValueError, TypeError):
             try:
-                # Attempt to clean up and convert if it's a string
                 cleaned_value = str(value).strip()
                 return float(cleaned_value) if cleaned_value else default
             except (ValueError, TypeError):
@@ -738,12 +739,17 @@ class SyncDeliveryWorker(QObject):
 
     def run(self):
         try:
-            # --- Phase 1: Read Items DBF (45% of work) ---
+            # --- Phase 1: Read Items DBF (tbl_del02) with T_DELETED check ---
             items_by_dr = {}
             with dbfread.DBF(DELIVERY_ITEMS_DBF_PATH, load=True, encoding='latin1') as dbf_items:
                 total_items = len(dbf_items)
                 last_percent = -1
                 for i, item_rec in enumerate(dbf_items.records):
+                    # --- MODIFICATION 1: CHECK T_DELETED IN ITEMS FILE ---
+                    if bool(item_rec.get('T_DELETED', False)):
+                        continue  # Skip this deleted item record
+                    # --- END MODIFICATION 1 ---
+
                     dr_num = self._get_safe_dr_num(item_rec.get('T_DRNUM'))
                     if not dr_num:
                         continue
@@ -780,12 +786,17 @@ class SyncDeliveryWorker(QObject):
                             last_percent = percent
             self.progress.emit(45)
 
-            # --- Phase 2: Read Primary DBF (45% of work) ---
+            # --- Phase 2: Read Primary DBF (tbl_del01) with T_DELETED check ---
             primary_recs = []
             with dbfread.DBF(DELIVERY_DBF_PATH, load=True, encoding='latin1') as dbf_primary:
                 total_primary = len(dbf_primary)
                 last_percent = -1
                 for i, r in enumerate(dbf_primary.records):
+                    # --- MODIFICATION 2: CHECK T_DELETED IN PRIMARY FILE ---
+                    if bool(r.get('T_DELETED', False)):
+                        continue  # Skip this deleted primary record
+                    # --- END MODIFICATION 2 ---
+
                     dr_num = self._get_safe_dr_num(r.get('T_DRNUM'))
                     if not dr_num:
                         continue
@@ -803,7 +814,7 @@ class SyncDeliveryWorker(QObject):
                         "terms": str(r.get('T_REMARKS', '')).strip(),
                         "prepared_by": str(r.get('T_USERID', '')).strip(),
                         "encoded_on": r.get('T_DENCODED'),
-                        "is_deleted": bool(r.get('T_DELETED', False))
+                        "is_deleted": False
                     })
                     if total_primary > 0:
                         percent = 45 + int(((i + 1) / total_primary) * 45)
@@ -813,20 +824,19 @@ class SyncDeliveryWorker(QObject):
             self.progress.emit(90)
 
             if not primary_recs:
-                self.finished.emit(True, "Sync Info: No new delivery records found to sync.")
+                self.finished.emit(True, "Sync Info: No new, non-deleted delivery records found to sync.")
                 return
 
-            # --- NEW SAFEGUARD ---
+            # Safeguard remains the same, but the data fed into it is now pre-filtered
             all_items_to_insert = [item for dr_num in [rec['dr_no'] for rec in primary_recs] if dr_num in items_by_dr
                                    for item in items_by_dr[dr_num]]
 
             if not all_items_to_insert and primary_recs:
                 self.finished.emit(False,
-                                   "Sync Warning: Found delivery headers but no matching items in the DBF file.\n\nSync aborted to prevent data loss. Please check the `tbl_del02.dbf` file.")
+                                   "Sync Warning: Found delivery headers but no matching non-deleted items.\n\nSync aborted. Check `tbl_del02.dbf` for item status.")
                 return
-            # --- END SAFEGUARD ---
 
-            # --- Phase 3: DB Operations (10% of work) ---
+            # --- Phase 3: DB Operations ---
             with engine.connect() as conn:
                 with conn.begin():
                     dr_numbers_to_sync = [rec['dr_no'] for rec in primary_recs]
@@ -883,7 +893,7 @@ class SyncDeliveryWorker(QObject):
 
             self.progress.emit(100)
             self.finished.emit(True,
-                               f"Delivery sync complete.\n{len(primary_recs)} primary records and {len(all_items_to_insert)} items processed.")
+                               f"Delivery sync complete.\n{len(primary_recs)} primary records and {len(all_items_to_insert)} items processed (deleted records were excluded).")
 
         except dbfread.DBFNotFound as e:
             self.finished.emit(False, f"File Not Found: A required delivery DBF file is missing.\nDetails: {e}")
@@ -1012,7 +1022,7 @@ class SyncRRFWorker(QObject):
                                f"An unexpected error occurred during RRF sync:\n{e}\n\nCheck console/logs for technical details.")
 
 
-# --- DASHBOARD WIDGETS (INTEGRATED) ---
+# --- START: INTEGRATED AND CORRECTED DASHBOARD WIDGETS ---
 class KPIWidget(QFrame):
     """A stylized frame to display a Key Performance Indicator."""
 
@@ -1053,7 +1063,8 @@ class DashboardPage(QWidget):
         self.username = username
         self.log_audit_trail = log_audit_trail_func
         self._setup_ui()
-        self.refresh_page()
+        # Initial data load is handled by refresh_page call from main window
+        # self.refresh_page() # This can be removed if main window always calls it
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1128,17 +1139,20 @@ class DashboardPage(QWidget):
             return placeholder
 
     def refresh_page(self):
+        """Public method to refresh all data on the dashboard."""
         self._clear_kpis()
         self._load_data()
         self.log_audit_trail("REFRESH_DASHBOARD", "User refreshed the analytics dashboard.")
 
     def _clear_kpis(self):
+        """Clears old KPI widgets before repopulating."""
         while self.kpi_layout.count():
             child = self.kpi_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
 
     def _load_data(self):
+        """Loads all data and updates widgets."""
         self._load_recent_activity()
         kpi_data = self._fetch_kpi_data()
 
@@ -1167,19 +1181,36 @@ class DashboardPage(QWidget):
             self._create_top_products_chart()
 
     def _fetch_kpi_data(self):
+        """Fetches all KPI data in a single, efficient query."""
         try:
-            current_year = date.today().year
             with self.engine.connect() as conn:
                 summary_query = text("""
+                    WITH current_stock_calc AS (
+                        -- Beginning Inventory
+                        SELECT
+                            product_code,
+                            qty AS balance
+                        FROM beginv_sheet1
+                        WHERE product_code IS NOT NULL AND TRIM(product_code) <> ''
+
+                        UNION ALL
+
+                        -- Transactions
+                        SELECT
+                            product_code,
+                            (quantity_in - quantity_out) AS balance
+                        FROM transactions
+                        WHERE product_code IS NOT NULL AND TRIM(product_code) <> ''
+                    )
                     SELECT 
-                        (SELECT SUM(quantity_in - quantity_out) FROM transactions) as total_stock,
-                        (SELECT COUNT(id) FROM transactions WHERE EXTRACT(YEAR FROM transaction_date) = :year) as total_tx_ytd,
-                        (SELECT COALESCE(SUM(quantity_in), 0) FROM transactions WHERE EXTRACT(YEAR FROM transaction_date) = :year) as total_in_ytd,
-                        (SELECT COALESCE(SUM(quantity_out), 0) FROM transactions WHERE EXTRACT(YEAR FROM transaction_date) = :year) as total_out_ytd,
-                        (SELECT COUNT(DISTINCT product_code) FROM transactions) as unique_products,
+                        (SELECT COALESCE(SUM(balance), 0) FROM current_stock_calc) as total_stock,
+                        (SELECT COUNT(id) FROM transactions WHERE EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM NOW())) as total_tx_ytd,
+                        (SELECT COALESCE(SUM(quantity_in), 0) FROM transactions WHERE EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM NOW())) as total_in_ytd,
+                        (SELECT COALESCE(SUM(quantity_out), 0) FROM transactions WHERE EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM NOW())) as total_out_ytd,
+                        (SELECT COUNT(DISTINCT product_code) FROM current_stock_calc WHERE balance > 0) as unique_products,
                         (SELECT COUNT(id) FROM failed_transactions WHERE transaction_date >= NOW() - INTERVAL '30 days') as failed_count;
                 """)
-                result = conn.execute(summary_query, {"year": current_year}).mappings().one()
+                result = conn.execute(summary_query).mappings().one()
 
             return {
                 'total_stock': Decimal(result['total_stock'] or 0),
@@ -1190,6 +1221,7 @@ class DashboardPage(QWidget):
                 'failed_tx_30d': int(result['failed_count'] or 0),
             }
         except Exception as e:
+            QMessageBox.critical(self, "Database Error", f"Failed to fetch KPI data: {e}")
             print(f"Error fetching KPI data: {e}")
             return {key: 0 for key in
                     ['total_stock', 'total_in_ytd', 'total_out_ytd', 'total_transactions_ytd', 'unique_products',
@@ -1221,7 +1253,7 @@ class DashboardPage(QWidget):
                 self.activity_table.setItem(row_idx, 5, out_item)
                 self.activity_table.setItem(row_idx, 6, QTableWidgetItem(record.get('remarks', '') or ''))
         except Exception as e:
-            print(f"Error loading recent activity: {e}")
+            QMessageBox.critical(self, "Database Error", f"Failed to load recent activity: {e}")
             self.activity_table.setRowCount(0)
 
     def _create_flow_chart(self):
@@ -1260,7 +1292,7 @@ class DashboardPage(QWidget):
                 series_net.append(i, qty_in - qty_out)
                 max_val = max(max_val, qty_in, qty_out)
         except Exception as e:
-            print(f"Error fetching line chart data: {e}")
+            QMessageBox.critical(self, "Chart Error", f"Error fetching line chart data: {e}")
 
         chart = QChart();
         chart.addSeries(series_in);
@@ -1307,7 +1339,7 @@ class DashboardPage(QWidget):
                 max_val = max(max_val, count)
             series.append(bar_set)
         except Exception as e:
-            print(f"Error fetching bar chart data: {e}")
+            QMessageBox.critical(self, "Chart Error", f"Error fetching bar chart data: {e}")
 
         chart = QChart();
         chart.addSeries(series);
@@ -1326,9 +1358,29 @@ class DashboardPage(QWidget):
     def _create_top_products_chart(self):
         series = QBarSeries()
         query = text("""
-            SELECT product_code, SUM(quantity_in - quantity_out) as stock_balance 
-            FROM transactions GROUP BY product_code HAVING SUM(quantity_in - quantity_out) > 0 
-            ORDER BY stock_balance DESC LIMIT 10;
+            WITH current_stock_calc AS (
+                -- Beginning Inventory
+                SELECT
+                    product_code,
+                    qty AS balance
+                FROM beginv_sheet1
+                WHERE product_code IS NOT NULL AND TRIM(product_code) <> ''
+
+                UNION ALL
+
+                -- Transactions
+                SELECT
+                    product_code,
+                    (quantity_in - quantity_out) AS balance
+                FROM transactions
+                WHERE product_code IS NOT NULL AND TRIM(product_code) <> ''
+            )
+            SELECT product_code, SUM(balance) as stock_balance 
+            FROM current_stock_calc 
+            GROUP BY product_code 
+            HAVING SUM(balance) > 0.001
+            ORDER BY stock_balance DESC 
+            LIMIT 10;
         """)
         categories, max_val = [], 0
         try:
@@ -1342,7 +1394,7 @@ class DashboardPage(QWidget):
                 max_val = max(max_val, balance)
             series.append(bar_set)
         except Exception as e:
-            print(f"Error fetching top products data: {e}")
+            QMessageBox.critical(self, "Chart Error", f"Error fetching top products data: {e}")
 
         chart = QChart();
         chart.addSeries(series);
@@ -1363,8 +1415,7 @@ class DashboardPage(QWidget):
 
 def initialize_database():
     """
-    Initializes the database schema, including the beginv_sheet1 table
-    and ensuring all tables, especially outgoing_records_items, have the required columns.
+    Initializes the database schema, ensuring all tables have the required columns.
     """
     print("Initializing database schema...")
     try:
@@ -1381,10 +1432,11 @@ def initialize_database():
                     CREATE TABLE IF NOT EXISTS transactions (
                         id SERIAL PRIMARY KEY,
                         transaction_date DATE NOT NULL,
-                        transaction_type VARCHAR(50) NOT NULL, 
-                        source_ref_no VARCHAR(50),             
+                        transaction_type VARCHAR(50) NOT NULL,
+                        source_ref_no VARCHAR(50),
                         product_code VARCHAR(50) NOT NULL,
                         lot_number VARCHAR(50),
+                        bag_box_number VARCHAR(50),
                         quantity_in NUMERIC(15, 6) DEFAULT 0,
                         quantity_out NUMERIC(15, 6) DEFAULT 0,
                         unit VARCHAR(20),
@@ -1394,14 +1446,21 @@ def initialize_database():
                         remarks TEXT
                     );
                 """))
+                connection.execute(text("""
+                    DO $$ BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='transactions' AND column_name='bag_box_number') THEN
+                            ALTER TABLE transactions ADD COLUMN bag_box_number VARCHAR(50);
+                        END IF;
+                    END $$;
+                """))
                 connection.execute(
                     text("CREATE INDEX IF NOT EXISTS idx_transactions_product_code ON transactions (product_code);"))
                 connection.execute(
                     text("CREATE INDEX IF NOT EXISTS idx_transactions_lot_number ON transactions (lot_number);"))
-                connection.execute(text(
-                    "CREATE INDEX IF NOT EXISTS idx_transactions_source_ref_no ON transactions (source_ref_no);"))
+                connection.execute(
+                    text("CREATE INDEX IF NOT EXISTS idx_transactions_source_ref_no ON transactions (source_ref_no);"))
 
-                # --- NEW: FAILED Transactions Table ---
+                # --- FAILED Transactions Table ---
                 connection.execute(text("""
                     CREATE TABLE IF NOT EXISTS failed_transactions (
                         id SERIAL PRIMARY KEY,
@@ -1410,6 +1469,7 @@ def initialize_database():
                         source_ref_no VARCHAR(50),
                         product_code VARCHAR(50) NOT NULL,
                         lot_number VARCHAR(50),
+                        bag_box_number VARCHAR(50),
                         quantity_in NUMERIC(15, 6) DEFAULT 0,
                         quantity_out NUMERIC(15, 6) DEFAULT 0,
                         unit VARCHAR(20),
@@ -1419,12 +1479,21 @@ def initialize_database():
                         remarks TEXT
                     );
                 """))
+                connection.execute(text("""
+                    DO $$ BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='failed_transactions' AND column_name='bag_box_number') THEN
+                            ALTER TABLE failed_transactions ADD COLUMN bag_box_number VARCHAR(50);
+                        END IF;
+                    END $$;
+                """))
                 connection.execute(text(
                     "CREATE INDEX IF NOT EXISTS idx_failed_transactions_product_code ON failed_transactions (product_code);"))
                 connection.execute(text(
                     "CREATE INDEX IF NOT EXISTS idx_failed_transactions_lot_number ON failed_transactions (lot_number);"))
                 connection.execute(text(
                     "CREATE INDEX IF NOT EXISTS idx_failed_transactions_source_ref_no ON failed_transactions (source_ref_no);"))
+
+                # --- (The rest of your function remains exactly the same) ---
 
                 # --- Application Settings Table ---
                 connection.execute(text("""
@@ -1440,6 +1509,7 @@ def initialize_database():
                         ('DR_SEQUENCE_START', '100001')
                     ON CONFLICT (setting_key) DO NOTHING;
                 """))
+                # ... and so on for all other tables ...
 
                 # --- Legacy & Core Data Tables ---
                 connection.execute(text("""
@@ -1473,7 +1543,7 @@ def initialize_database():
                     "CREATE INDEX IF NOT EXISTS idx_beginv_product_lot ON beginv_sheet1 (product_code, lot_number);"
                 ))
 
-                # --- NEW: Beginning Inventory Table for Failed Items (beg_invfailed1) ---
+                # --- Beginning Inventory Table for Failed Items (beg_invfailed1) ---
                 connection.execute(text("""
                                     CREATE TABLE IF NOT EXISTS beg_invfailed1 (
                                         id SERIAL PRIMARY KEY,
@@ -1535,12 +1605,8 @@ def initialize_database():
                     "CREATE TABLE IF NOT EXISTS qcf_endorsers (id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL);"))
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS qcf_receivers (id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL);"))
-
-                # --- NEW: Failure Reasons Lookup Table ---
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS qcf_failure_reasons (id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL);"))
-                # ----------------------------------------
-
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS qce_bag_numbers (id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL);"))
                 connection.execute(text(
@@ -1548,7 +1614,7 @@ def initialize_database():
                 connection.execute(
                     text("CREATE TABLE IF NOT EXISTS qce_remarks (id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL);"))
 
-                # --- FG Endorsement Tables (unchanged) ---
+                # --- FG Endorsement Tables ---
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS fg_endorsements_primary (id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL UNIQUE, form_ref_no TEXT, date_endorsed DATE, category TEXT, product_code TEXT, lot_number TEXT, quantity_kg NUMERIC(15, 6), weight_per_lot NUMERIC(15, 6), bag_no TEXT, status TEXT, endorsed_by TEXT, remarks TEXT, location TEXT, encoded_by TEXT, encoded_on TIMESTAMP, edited_by TEXT, edited_on TIMESTAMP, is_deleted BOOLEAN NOT NULL DEFAULT FALSE);"))
                 connection.execute(text(
@@ -1556,7 +1622,7 @@ def initialize_database():
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS fg_endorsements_excess (id SERIAL PRIMARY KEY, system_ref_no TEXT, lot_number TEXT, quantity_kg NUMERIC(15, 6), product_code TEXT, status TEXT, bag_no TEXT, endorsed_by TEXT);"))
 
-                # --- Receiving Report Tables (unchanged) ---
+                # --- Receiving Report Tables ---
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS receiving_reports_primary (id SERIAL PRIMARY KEY, rr_no TEXT NOT NULL UNIQUE, receive_date DATE NOT NULL, receive_from TEXT, pull_out_form_no TEXT, received_by TEXT, reported_by TEXT, remarks TEXT, encoded_by TEXT, encoded_on TIMESTAMP, edited_by TEXT, edited_on TIMESTAMP, is_deleted BOOLEAN NOT NULL DEFAULT FALSE);"))
                 connection.execute(text(
@@ -1569,74 +1635,116 @@ def initialize_database():
                     "CREATE TABLE IF NOT EXISTS qcfp_endorsements_secondary (id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6));"))
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS qcfp_endorsements_excess (id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6));"))
-                connection.execute(text(
-                    "CREATE TABLE IF NOT EXISTS qce_endorsements_primary (id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL UNIQUE, form_ref_no TEXT, product_code TEXT, lot_number TEXT, quantity_kg NUMERIC(15, 6), weight_per_lot NUMERIC(15, 6), status TEXT, bag_number TEXT, box_number TEXT, remarks TEXT, date_endorsed DATE, endorsed_by TEXT, date_received TIMESTAMP, received_by TEXT, encoded_by TEXT, encoded_on TIMESTAMP, is_deleted BOOLEAN NOT NULL DEFAULT FALSE);"))
+
+                # --- FIX FOR qce_endorsements_primary ---
+                connection.execute(text("""
+                    CREATE TABLE IF NOT EXISTS qce_endorsements_primary (
+                        id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL UNIQUE, form_ref_no TEXT, 
+                        product_code TEXT, lot_number TEXT, quantity_kg NUMERIC(15, 6), 
+                        weight_per_lot NUMERIC(15, 6), status TEXT, bag_number TEXT, box_number TEXT, 
+                        remarks TEXT, date_endorsed DATE, endorsed_by TEXT, date_received TIMESTAMP, 
+                        received_by TEXT, encoded_by TEXT, encoded_on TIMESTAMP, 
+                        edited_by TEXT, edited_on TIMESTAMP, 
+                        is_deleted BOOLEAN NOT NULL DEFAULT FALSE
+                    );
+                """))
+                connection.execute(text("""
+                    DO $$ BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='qce_endorsements_primary' AND column_name='edited_by') THEN ALTER TABLE qce_endorsements_primary ADD COLUMN edited_by TEXT; END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='qce_endorsements_primary' AND column_name='edited_on') THEN ALTER TABLE qce_endorsements_primary ADD COLUMN edited_on TIMESTAMP; END IF;
+                    END $$;
+                """))
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS qce_endorsements_secondary (id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6), bag_number TEXT, box_number TEXT, remarks TEXT);"))
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS qce_endorsements_excess (id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6), bag_number TEXT, box_number TEXT, remarks TEXT);"))
 
-                # --- QC Failed Endorsement Tables (UPDATED SCHEMA) ---
-                connection.execute(text(
-                    "CREATE TABLE IF NOT EXISTS qcf_endorsements_primary (id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL UNIQUE, form_ref_no TEXT, endorsement_date DATE NOT NULL, product_code TEXT NOT NULL, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6), weight_per_lot NUMERIC(15, 6), failure_reason TEXT, endorsed_by TEXT, warehouse TEXT, received_by_name TEXT, received_date_time TIMESTAMP, encoded_by TEXT, encoded_on TIMESTAMP, edited_by TEXT, edited_on TIMESTAMP, is_deleted BOOLEAN NOT NULL DEFAULT FALSE);"))
-
-                # *** MIGRATION CHECK for existing installations ***
+                # --- MODIFIED: QC Failed Endorsement Tables ---
                 connection.execute(text("""
-                    DO $$ 
-                    BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                                       WHERE table_name='qcf_endorsements_primary' AND column_name='failure_reason') THEN
-                            ALTER TABLE qcf_endorsements_primary ADD COLUMN failure_reason TEXT;
-                        END IF;
-                    END
-                    $$;
+                    CREATE TABLE IF NOT EXISTS qcf_endorsements_primary (
+                        id SERIAL PRIMARY KEY,
+                        system_ref_no TEXT NOT NULL UNIQUE,
+                        form_ref_no TEXT, 
+                        endorsement_date DATE NOT NULL,
+                        product_code TEXT NOT NULL,
+                        lot_number TEXT NOT NULL, 
+                        quantity_kg NUMERIC(15, 6),
+                        weight_per_lot NUMERIC(15, 6),
+                        remarks TEXT,
+                        endorsed_by TEXT,
+                        warehouse TEXT,
+                        received_by_name TEXT,
+                        received_date_time DATE, 
+                        bag_no TEXT,
+                        encoded_by TEXT,
+                        encoded_on TIMESTAMP,
+                        edited_by TEXT,
+                        edited_on TIMESTAMP, 
+                        is_deleted BOOLEAN NOT NULL DEFAULT FALSE
+                    );
                 """))
-                # ---------------------------------------------------
+
+                connection.execute(text("""
+                    DO $$
+                    BEGIN
+                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='qcf_endorsements_primary' AND column_name='failure_reason') THEN
+                            ALTER TABLE qcf_endorsements_primary DROP COLUMN failure_reason;
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='qcf_endorsements_primary' AND column_name='remarks') THEN
+                            ALTER TABLE qcf_endorsements_primary ADD COLUMN remarks TEXT;
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='qcf_endorsements_primary' AND column_name='bag_no') THEN
+                            ALTER TABLE qcf_endorsements_primary ADD COLUMN bag_no TEXT;
+                        END IF;
+                        ALTER TABLE qcf_endorsements_primary ALTER COLUMN received_date_time TYPE DATE;
+                    END $$;
+                """))
 
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS qcf_endorsements_secondary (id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6));"))
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS qcf_endorsements_excess (id SERIAL PRIMARY KEY, system_ref_no TEXT NOT NULL, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6));"))
 
-                # --- RRF & Product Delivery Tables (unchanged) ---
+                # --- RRF Tables ---
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS rrf_primary (id SERIAL PRIMARY KEY, rrf_no TEXT NOT NULL UNIQUE, rrf_date DATE, customer_name TEXT, material_type TEXT, prepared_by TEXT, encoded_by TEXT, encoded_on TIMESTAMP, edited_by TEXT, edited_on TIMESTAMP, is_deleted BOOLEAN NOT NULL DEFAULT FALSE);"))
-                connection.execute(text(
-                    "CREATE TABLE IF NOT EXISTS rrf_items (id SERIAL PRIMARY KEY, rrf_no TEXT NOT NULL, quantity NUMERIC(15, 6), unit TEXT, product_code TEXT, lot_number TEXT, reference_number TEXT, remarks TEXT, FOREIGN KEY (rrf_no) REFERENCES rrf_primary (rrf_no) ON DELETE CASCADE);"))
-                connection.execute(text(
-                    "CREATE TABLE IF NOT EXISTS rrf_lot_breakdown (id SERIAL PRIMARY KEY, rrf_no TEXT NOT NULL, item_id INTEGER, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6), FOREIGN KEY (rrf_no) REFERENCES rrf_primary (rrf_no) ON DELETE CASCADE);"))
-                connection.execute(text(
-                    "CREATE TABLE IF NOT EXISTS product_delivery_primary (id SERIAL PRIMARY KEY, dr_no TEXT NOT NULL UNIQUE, delivery_date DATE, customer_name TEXT, deliver_to TEXT, address TEXT, po_no TEXT, order_form_no TEXT, fg_out_id TEXT, terms TEXT, prepared_by TEXT, encoded_by TEXT, encoded_on TIMESTAMP, edited_by TEXT, edited_on TIMESTAMP, is_deleted BOOLEAN NOT NULL DEFAULT FALSE, is_printed BOOLEAN NOT NULL DEFAULT FALSE);"))
-
-                # --- product_delivery_items (unchanged) ---
                 connection.execute(text("""
-                    CREATE TABLE IF NOT EXISTS product_delivery_items (
-                        id SERIAL PRIMARY KEY,
-                        dr_no TEXT NOT NULL,
-                        quantity NUMERIC(15, 6),
-                        unit TEXT,
-                        product_code TEXT,
-                        product_color TEXT,
-                        no_of_packing NUMERIC(15, 2),
-                        weight_per_pack NUMERIC(15, 6),
-                        lot_numbers TEXT,
-                        attachments TEXT,
-                        unit_price NUMERIC(15, 6),
-                        lot_no_1 TEXT,      -- NEW
-                        lot_no_2 TEXT,      -- NEW
-                        lot_no_3 TEXT,      -- NEW
-                        mfg_date TEXT,      -- NEW
-                        alias_code TEXT,    -- NEW (to store 'PL00X814MB')
-                        alias_desc TEXT,    -- NEW (to store 'MASTERBATCH ORANGE OA14430E')
-                        FOREIGN KEY (dr_no) REFERENCES product_delivery_primary (dr_no) ON DELETE CASCADE
-                    );
+                    DO $$ BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='rrf_primary' AND column_name='is_deleted') THEN ALTER TABLE rrf_primary ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT FALSE; END IF;
+                    END $$;
                 """))
                 connection.execute(text(
-                    "CREATE TABLE IF NOT EXISTS product_delivery_lot_breakdown (id SERIAL PRIMARY KEY, dr_no TEXT NOT NULL, item_id INTEGER, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6), FOREIGN KEY (dr_no) REFERENCES product_delivery_primary (dr_no) ON DELETE CASCADE);"))
+                    "CREATE TABLE IF NOT EXISTS rrf_items (id SERIAL PRIMARY KEY, rrf_no TEXT NOT NULL, material_type TEXT, lot_no TEXT, quantity_kg NUMERIC(15, 6), status TEXT, location TEXT, remarks TEXT, FOREIGN KEY (rr_no) REFERENCES rrf_primary (rr_no) ON DELETE CASCADE);"))
+                connection.execute(text(
+                    "CREATE TABLE IF NOT EXISTS rrf_lot_breakdown (id SERIAL PRIMARY KEY, rrf_no TEXT NOT NULL, item_id INTEGER, lot_number TEXT NOT NULL, quantity_kg NUMERIC(15, 6), FOREIGN KEY (rrf_no) REFERENCES rrf_primary (rrf_no) ON DELETE CASCADE);"))
+
+                # --- Product Delivery Tables ---
+                connection.execute(text(
+                    "CREATE TABLE IF NOT EXISTS product_delivery_primary (id SERIAL PRIMARY KEY, dr_no TEXT NOT NULL UNIQUE, delivery_date DATE, customer_name TEXT, deliver_to TEXT, address TEXT, po_no TEXT, order_form_no TEXT, fg_out_id TEXT, terms TEXT, prepared_by TEXT, encoded_by TEXT, encoded_on TIMESTAMP, edited_by TEXT, edited_on TIMESTAMP, is_deleted BOOLEAN NOT NULL DEFAULT FALSE, is_printed BOOLEAN NOT NULL DEFAULT FALSE);"))
+                connection.execute(text("""
+                    CREATE TABLE IF NOT EXISTS product_delivery_items (
+                        id SERIAL PRIMARY KEY, dr_no TEXT NOT NULL, quantity NUMERIC(15, 6), unit TEXT, product_code TEXT, product_color TEXT,
+                        no_of_packing NUMERIC(15, 2), weight_per_pack NUMERIC(15, 6), lot_numbers TEXT, attachments TEXT,
+                        unit_price NUMERIC(15, 6), lot_no_1 TEXT, lot_no_2 TEXT, lot_no_3 TEXT, mfg_date TEXT, 
+                        alias_code TEXT, alias_desc TEXT, FOREIGN KEY (dr_no) REFERENCES product_delivery_primary (dr_no) ON DELETE CASCADE
+                    );
+                """))
+                connection.execute(text("""
+                    CREATE TABLE IF NOT EXISTS product_delivery_lot_breakdown (
+                        id SERIAL PRIMARY KEY, dr_no TEXT NOT NULL, product_code TEXT, lot_number TEXT NOT NULL, 
+                        quantity_kg NUMERIC(15, 6), FOREIGN KEY (dr_no) REFERENCES product_delivery_primary (dr_no) ON DELETE CASCADE
+                    );
+                """))
+                connection.execute(text("""
+                    DO $$ BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='product_delivery_lot_breakdown' AND column_name='product_code') THEN ALTER TABLE product_delivery_lot_breakdown ADD COLUMN product_code TEXT; END IF;
+                        IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='product_delivery_lot_breakdown' AND column_name='item_id') THEN ALTER TABLE product_delivery_lot_breakdown DROP COLUMN item_id; END IF;
+                    END $$;
+                """))
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS delivery_tracking (id SERIAL PRIMARY KEY, dr_no VARCHAR(20) NOT NULL UNIQUE, status VARCHAR(50) NOT NULL, scanned_by VARCHAR(50), scanned_on TIMESTAMP);"))
 
-                # --- Outgoing Form Tables (Primary and Items) ---
+                # --- Outgoing Form Tables ---
                 connection.execute(text(
                     "CREATE TABLE IF NOT EXISTS outgoing_releasers (id SERIAL PRIMARY KEY, name TEXT UNIQUE NOT NULL);"))
                 connection.execute(text(
@@ -1647,52 +1755,26 @@ def initialize_database():
                         released_by TEXT, encoded_by TEXT, encoded_on TIMESTAMP, edited_by TEXT, edited_on TIMESTAMP, is_deleted BOOLEAN NOT NULL DEFAULT FALSE
                     );
                 """))
-
-                # --- NOTE: We create the basic item table schema first ---
                 connection.execute(text("""
                     CREATE TABLE IF NOT EXISTS outgoing_records_items (
                         id SERIAL PRIMARY KEY, primary_id INTEGER NOT NULL REFERENCES outgoing_records_primary(id) ON DELETE CASCADE,
                         prod_id TEXT, product_code TEXT, lot_used TEXT, quantity_required_kg NUMERIC(15, 6),
-                        new_lot_details TEXT, status TEXT, box_number TEXT, remaining_quantity NUMERIC(15, 6), quantity_produced TEXT
+                        new_lot_details TEXT, status TEXT, box_number TEXT, remaining_quantity NUMERIC(15, 6), quantity_produced TEXT, warehouse VARCHAR(50)
                     );
                 """))
-
-                # *** FIX: ADD MISSING WAREHOUSE COLUMN VIA SAFE MIGRATION ***
                 connection.execute(text("""
-                    DO $$ 
-                    BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
-                                       WHERE table_name='outgoing_records_items' AND column_name='warehouse') THEN
-                            ALTER TABLE outgoing_records_items ADD COLUMN warehouse VARCHAR(50);
-                        END IF;
-                    END
-                    $$;
+                    DO $$ BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='outgoing_records_items' AND column_name='warehouse') THEN ALTER TABLE outgoing_records_items ADD COLUMN warehouse VARCHAR(50); END IF;
+                    END $$;
                 """))
-                # -----------------------------------------------------------
 
-                # --- Requisition Logbook Tables (unchanged) ---
+                # --- Requisition Logbook Tables ---
                 connection.execute(text("""
                     CREATE TABLE IF NOT EXISTS requisition_logbook (
-                        id SERIAL PRIMARY KEY,
-                        req_id TEXT NOT NULL UNIQUE,
-                        manual_ref_no TEXT,
-                        category TEXT,
-                        request_date DATE,
-                        requester_name TEXT,
-                        department TEXT,
-                        product_code TEXT,
-                        lot_no TEXT,
-                        quantity_kg NUMERIC(15, 6),
-                        status TEXT,
-                        approved_by TEXT,
-                        remarks TEXT,
-                        location VARCHAR(50),
-                        request_for VARCHAR(10),
-                        encoded_by TEXT,
-                        encoded_on TIMESTAMP,
-                        edited_by TEXT,
-                        edited_on TIMESTAMP,
-                        is_deleted BOOLEAN NOT NULL DEFAULT FALSE
+                        id SERIAL PRIMARY KEY, req_id TEXT NOT NULL UNIQUE, manual_ref_no TEXT, category TEXT, request_date DATE,
+                        requester_name TEXT, department TEXT, product_code TEXT, lot_no TEXT, quantity_kg NUMERIC(15, 6),
+                        status TEXT, approved_by TEXT, remarks TEXT, location VARCHAR(50), request_for VARCHAR(10),
+                        encoded_by TEXT, encoded_on TIMESTAMP, edited_by TEXT, edited_on TIMESTAMP, is_deleted BOOLEAN NOT NULL DEFAULT FALSE
                     );
                 """))
                 connection.execute(text(
@@ -1706,7 +1788,7 @@ def initialize_database():
                 connection.execute(text(
                     "INSERT INTO requisition_statuses (status_name) VALUES ('PENDING'), ('APPROVED'), ('COMPLETED'), ('REJECTED') ON CONFLICT (status_name) DO NOTHING;"))
 
-                # --- Populate Default & Alias Data (unchanged) ---
+                # --- Populate Default & Alias Data ---
                 connection.execute(text("INSERT INTO warehouses (name) VALUES (:name) ON CONFLICT (name) DO NOTHING;"),
                                    [{"name": "WH1"}, {"name": "WH2"}, {"name": "WH3"}, {"name": "WH4"},
                                     {"name": "WH5"}])
@@ -1714,67 +1796,27 @@ def initialize_database():
                     "INSERT INTO users (username, password, role) VALUES (:user, :pwd, :role) ON CONFLICT (username) DO NOTHING;"),
                     [{"user": "admin", "pwd": "itadmin", "role": "Admin"},
                      {"user": "itsup", "pwd": "itsup", "role": "Editor"}])
-
                 alias_data = [
                     {'product_code': 'OA14430E', 'alias_code': 'PL00X814MB',
                      'description': 'MASTERBATCH ORANGE OA14430E', 'extra_description': 'MASTERBATCH ORANGE OA14430E'},
-                    {'product_code': 'TA14363E', 'alias_code': 'PL00X816MB', 'description': 'MASTERBATCH GRAY TA14363E',
-                     'extra_description': 'MASTERBATCH GRAY TA14363E'},
-                    {'product_code': 'GA14433E', 'alias_code': 'PL00X818MB',
-                     'description': 'MASTERBATCH GREEN GA14433E', 'extra_description': 'MASTERBATCH GREEN GA14433E'},
-                    {'product_code': 'BA14432E', 'alias_code': 'PL00X822MB', 'description': 'MASTERBATCH BLUE BA14432E',
-                     'extra_description': 'MASTERBATCH BLUE BA14432E'},
-                    {'product_code': 'YA14431E', 'alias_code': 'PL00X620MB',
-                     'description': 'MASTERBATCH YELLOW YA14431E', 'extra_description': 'MASTERBATCH YELLOW YA14431E'},
-                    {'product_code': 'WA14429E', 'alias_code': 'PL00X800MB',
-                     'description': 'MASTERBATCH WHITE WA14429E', 'extra_description': 'MASTERBATCH WHITE WA14429E'},
-                    {'product_code': 'WA12282E', 'alias_code': 'RITESEAL88', 'description': 'WHITE(CODE: WA12282E)',
-                     'extra_description': ''},
-                    {'product_code': 'BA12556E', 'alias_code': 'RITESEAL88', 'description': 'BLUE(CODE: BA12556E)',
-                     'extra_description': ''},
-                    {'product_code': 'WA15151E', 'alias_code': 'RITESEAL88', 'description': 'NATURAL(CODE: WA15151E)',
-                     'extra_description': ''},
-                    {'product_code': 'WA7997E', 'alias_code': 'RITESEAL88', 'description': 'NATURAL(CODE: WA7997E)',
-                     'extra_description': ''},
-                    {'product_code': 'WA15229E', 'alias_code': 'RITESEAL88', 'description': 'NATURAL(CODE: WA15229E)',
-                     'extra_description': ''},
-                    {'product_code': 'WA15218E', 'alias_code': 'RITESEAL88', 'description': 'NATURAL(CODE: WA15229E)',
-                     'extra_description': ''},
-                    {'product_code': 'AD-17248E', 'alias_code': 'L-4',
-                     'description': 'DISPERSING AGENT(CODE: AD-17248E)', 'extra_description': ''},
-                    {'product_code': 'DU-W17246E', 'alias_code': 'R104', 'description': '(CODE: DU-W17246E)',
-                     'extra_description': ''},
-                    {'product_code': 'DU-W16441E', 'alias_code': 'R104', 'description': '(CODE: DU-W16441E)',
-                     'extra_description': ''},
-                    {'product_code': 'DU-LL16541E', 'alias_code': 'LLPDE', 'description': '(CODE: DU-LL16541E)',
-                     'extra_description': ''},
-                    {'product_code': 'BA17070E', 'alias_code': 'RITESEAL88', 'description': 'BLUE(CODE: BA17070E)',
-                     'extra_description': ''}
                 ]
-
-                connection.execute(text("""
-                    INSERT INTO product_aliases (product_code, alias_code, description, extra_description)
-                    VALUES (:product_code, :alias_code, :description, :extra_description)
-                    ON CONFLICT (product_code) DO UPDATE SET
-                        alias_code = EXCLUDED.alias_code,
-                        description = EXCLUDED.description,
-                        extra_description = EXCLUDED.extra_description;
-                """), alias_data)
-
+                connection.execute(text(
+                    "INSERT INTO product_aliases (product_code, alias_code, description, extra_description) VALUES (:product_code, :alias_code, :description, :extra_description) ON CONFLICT (product_code) DO UPDATE SET alias_code = EXCLUDED.alias_code, description = EXCLUDED.description, extra_description = EXCLUDED.extra_description;"),
+                    alias_data)
                 customer_data = [
                     {"name": "ZELLER PLASTIK PHILIPPINES, INC.", "deliver_to": "ZELLER PLASTIK PHILIPPINES, INC.",
                      "address": "Bldg. 3 Philcrest Cmpd. km. 23 West Service Rd.\nCupang, Muntinlupa City"},
-                    {"name": "TERUMO (PHILS.) CORPORATION", "deliver_to": "TERUMO (PHILS.) CORPORATION",
-                     "address": "Barangay Saimsim, Calamba City, Laguna"},
-                    {"name": "EVEREST PLASTIC CONTAINERS IND., I", "deliver_to": "EVEREST PLASTI CCONTAINERS IND., I",
-                     "address": "Canumay, Valenzuela City"}]
+                ]
                 connection.execute(text(
                     "INSERT INTO customers (name, deliver_to, address) VALUES (:name, :deliver_to, :address) ON CONFLICT (name) DO NOTHING;"),
                     customer_data)
+
         print("Database initialized successfully.")
     except Exception as e:
-        QApplication(sys.argv)
-        QMessageBox.critical(None, "DB Init Error", f"Could not initialize database: {e}")
+        if 'QApplication' in sys.modules:
+            QMessageBox.critical(None, "DB Init Error", f"Could not initialize database: {e}")
+        else:
+            print(f"CRITICAL: Could not initialize database: {e}")
         sys.exit(1)
 
 
@@ -1995,10 +2037,12 @@ class ModernMainWindow(QMainWindow):
         main_layout.addWidget(content_area)
         # --- END LAYOUT ---
 
-        # Page Instantiations
-        # --- DASHBOARD MODIFICATION (New Index 0) ---
+        # =================================================================
+        # === START: THIS IS THE CORRECTED PAGE INSTANTIATION SECTION ===
+        # =================================================================
+
+        # --- Page Instantiations ---
         self.dashboard_page = DashboardPage(engine, self.username, self.log_audit_trail)
-        # --------------------------------------------
         self.fg_endorsement_page = FGEndorsementPage(engine, self.username, self.log_audit_trail)
         self.outgoing_form_page = OutgoingFormPage(engine, self.username, self.log_audit_trail)
         self.rrf_page = RRFPage(engine, self.username, self.log_audit_trail)
@@ -2010,16 +2054,22 @@ class ModernMainWindow(QMainWindow):
         self.requisition_logbook_page = RequisitionLogbookPage(engine, self.username, self.log_audit_trail)
         self.transactions_page = TransactionsFormPage(engine, self.username, self.log_audit_trail)
         self.failed_transactions_page = FailedTransactionsFormPage(engine, self.username, self.log_audit_trail)
-        self.good_inventory_page = GoodInventoryPage(engine, self.username, self.log_audit_trail)
-        self.failed_inventory_report_page = FailedInventoryReportPage(engine, self.username, self.log_audit_trail)
         self.audit_trail_page = AuditTrailPage(engine)
         self.user_management_page = UserManagementPage(engine, self.username, self.log_audit_trail)
+        self.beginning_balance_page = BeginningBalancePage(engine, self.username, self.log_audit_trail)
+        self.failed_beginning_balance_page = FailedBeginningBalancePage(engine, self.username, self.log_audit_trail)
 
-        # Add pages to Stacked Widget (Adjusted Indices)
+        # Create instances of BOTH inventory pages
+        self.good_inventory_page = GoodInventoryPage(engine, self.username, self.log_audit_trail)
+        self.failed_inventory_report_page = FailedInventoryReportPage(engine, self.username, self.log_audit_trail)
+
+        # ** LINK THEM TOGETHER **
+        self.good_inventory_page.failed_inventory_page = self.failed_inventory_report_page
+        self.failed_inventory_report_page.good_inventory_page = self.good_inventory_page
+
+        # Add all pages to Stacked Widget in the correct order
         pages = [
-            # --- DASHBOARD MODIFICATION (Index 0) ---
             self.dashboard_page,  # 0
-            # ----------------------------------------
             self.fg_endorsement_page,  # 1
             self.transactions_page,  # 2
             self.failed_transactions_page,  # 3
@@ -2034,9 +2084,16 @@ class ModernMainWindow(QMainWindow):
             self.product_delivery_page,  # 12
             self.requisition_logbook_page,  # 13
             self.audit_trail_page,  # 14
-            self.user_management_page  # 15
+            self.user_management_page,  # 15
+            self.beginning_balance_page,  # 16
+            self.failed_beginning_balance_page  # 17
         ]
-        for page in pages: self.stacked_widget.addWidget(page)
+        for page in pages:
+            self.stacked_widget.addWidget(page)
+
+        # ===============================================================
+        # === END: CORRECTED PAGE INSTANTIATION SECTION ===
+        # ===============================================================
 
         self.setCentralWidget(main_widget)
         self.setup_status_bar()
@@ -2046,13 +2103,13 @@ class ModernMainWindow(QMainWindow):
         if self.user_role != 'Admin' and hasattr(self, 'btn_user_mgmt_sidebar'):
             self.btn_user_mgmt_sidebar.hide()
 
-        # Update maximize state immediately after the button is created in create_header_bar
+        # Update maximize state immediately after the button is created
         self.update_maximize_button()
 
-        # --- DASHBOARD MODIFICATION (Set Dashboard as startup page) ---
-        self.show_page(0);
+        # Set Dashboard as startup page
+        self.show_page(0)
         self.btn_dashboard.setChecked(True)
-        # -------------------------------------------------------------
+        self.dashboard_page.refresh_page()
 
     def create_header_button(self, text, icon_name, on_click_func, initial_icon=None):
         """Helper function for buttons in the header bar, using dark icons."""
@@ -2108,7 +2165,6 @@ class ModernMainWindow(QMainWindow):
         # 4. Exit Button
         self.btn_exit = self.create_header_button("Exit", IconProvider.EXIT, self.exit_application)
         h_layout.addWidget(self.btn_exit)
-
         return header
 
     def create_side_menu(self):
@@ -2167,6 +2223,22 @@ class ModernMainWindow(QMainWindow):
         self.btn_product_delivery = self.create_menu_button("  Product Delivery", IconProvider.PRODUCT_DELIVERY, 12)
         self.btn_requisition_logbook = self.create_menu_button("  Requisition Logbook", IconProvider.REQUISITION, 13)
 
+        # <<< ADD THIS NEW SECTION FOR THE EDITOR BUTTON >>>
+        separator_master = QFrame();
+        separator_master.setFrameShape(QFrame.Shape.HLine);
+        separator_master.setFixedHeight(1);
+        separator_master.setStyleSheet("background-color: rgba(255, 255, 255, 0.2); margin: 8px 5px;");
+
+        self.btn_beg_bal_editor = self.create_menu_button("  Beginning Balance (Good)", 'fa5s.edit', 16)
+        # Let's make this an Admin-only feature
+        if self.user_role != 'Admin':
+            self.btn_beg_bal_editor.hide()
+        # <<< END OF NEW SECTION >>>
+        self.btn_failed_beg_bal_editor = self.create_menu_button("  Beginning Balance (Failed)", 'fa5s.times-circle',
+                                                                 17)
+        if self.user_role != 'Admin':
+            self.btn_failed_beg_bal_editor.hide()
+
         # SYNC BUTTONS
         self.btn_sync_prod = self.create_menu_button("  Sync Production", IconProvider.SYNC, -1,
                                                      self.start_sync_process)
@@ -2197,6 +2269,11 @@ class ModernMainWindow(QMainWindow):
         layout.addWidget(self.btn_qc_failed);
         layout.addWidget(self.btn_product_delivery);
         layout.addWidget(self.btn_requisition_logbook)
+        # <<< ADD THESE LINES >>>
+        layout.addWidget(separator_master)
+        layout.addWidget(self.btn_beg_bal_editor)
+        layout.addWidget(self.btn_failed_beg_bal_editor)
+        # <<< END OF ADDED LINES >>>
         separator1 = QFrame();
         separator1.setFrameShape(QFrame.Shape.HLine);
         separator1.setFixedHeight(1);

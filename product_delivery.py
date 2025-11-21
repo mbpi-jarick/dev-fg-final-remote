@@ -1,5 +1,10 @@
-# V4.0 (FEATURE) - Integrated live camera QR code scanner using OpenCV and PyZBar.
-# V3.0 (UI ENHANCEMENT) - Added icons to all buttons/tabs and styled the selected row color. (ICONS REMOVED)
+# V4.6 (ENHANCEMENT) - Added a context menu shortcut to the 'Breakdown Records' tab to quickly load a DR into the 'Lot Breakdown Tool' for modification.
+# V4.5 (USER REQUEST) - Added edit/remove functionality to the Lot Breakdown preview table. Users can now double-click or use buttons/context menu to modify lots before saving.
+# V4.4 (USER REQUEST) - Reverted Lot Breakdown save logic. Save is no longer scoped to a single product. It now saves the entire preview table for the selected DR, replacing all previous breakdowns for that DR.
+# V4.3 (FEATURE/FIX) - Lot breakdown tool now handles DRs with multiple product codes via a new product selector. Save/Delete operations are now scoped to the selected product.
+# V4.2 (FIX/ENHANCEMENT) - Lot breakdown tool now accumulates previews. Save is now idempotent (delete-then-insert). Added row selection to preview. Fixed accidental save on tab/enter.
+# V4.1 (FIX) - fix lot breakdown records --- add delete button and it should also delete in transaction passed records ---- user and encoded on must be the user who created the lot preview not the dr maker ---- # V4.0 (FEATURE) - Integrated live camera QR code scanner using OpenCV and PyZBar.
+# V3.0 (UI ENHANCEMENT) - Added icons to all buttons/tabs and styled the selected row color. (ICONS REMOVE)
 # V2.1 (FIX) - Corrected critical error in _save_record where extra data keys were passed to the database INSERT command.
 # V2 (USER REQUEST) - Completed and integrated with inventory transactions table for QTY_OUT on lot breakdown.
 # REVISED - Improved PDF generation to consistently display special descriptions regardless of entry method.
@@ -33,8 +38,7 @@ except ImportError:
     print("WARNING: 'opencv-python' or 'pyzbar' not found. Camera features will be disabled.")
     print("Install with: pip install opencv-python pyzbar numpy")
 
-# --- ReportLab & PyMuPDF Imports ---
-import fitz
+# --- ReportLab Imports ---
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 from reportlab.lib.pagesizes import letter, landscape
@@ -46,7 +50,20 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
 # --- PyQt6 Imports ---
-from PyQt6.QtCore import Qt, QDate, QSize, QSizeF, QDateTime, QRect, QRegularExpression, QThread, pyqtSignal, QTimer
+# --- PyQt6 Imports ---
+# --- ReportLab & PyMuPDF Imports ---
+import fitz  # <-- MAKE SURE THIS IS PRESENT
+from reportlab.lib import colors
+# ...
+
+# --- PyQt6 Imports ---
+from PyQt6.QtCore import Qt, QDate, QSize, QSizeF, QDateTime, QRect, QRegularExpression, QThread, pyqtSignal, QTimer # No QBuffer, QIODevice, QRectF
+# from PyQt6.QtPdf import QPdfDocument  # <-- REMOVE THIS
+# ...
+from PyQt6.QtGui import (QDoubleValidator, QPainter, QPageSize, QColor, QIntValidator, QImage, # Make sure QImage is here
+                         QRegularExpressionValidator, QFont, QPixmap)
+# ...
+#...
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QTabWidget, QFormLayout, QLineEdit, QDateEdit,
                              QPushButton, QTableWidget, QTableWidgetItem, QComboBox,
                              QAbstractItemView, QHeaderView, QMessageBox, QHBoxLayout, QLabel,
@@ -82,7 +99,7 @@ LIGHT_BUTTON_STYLE = f"""
     }}
 """
 SAVE_BUTTON_STYLE = f"""
-    QPushButton#SaveButton {{ 
+    QPushButton#SaveButton {{
         background-color: #d9eef9;
         color: {BUTTON_COLOR};
         border: 2px solid {BUTTON_COLOR};
@@ -375,6 +392,33 @@ class TerumoItemEntryDialog(QDialog):
                 "attachments": self.attachments_edit.toPlainText()}
 
 
+class EditLotDialog(QDialog):
+    """A dialog for editing a lot number and quantity in the breakdown preview."""
+
+    def __init__(self, lot_number, quantity_kg, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Lot")
+        layout = QFormLayout(self)
+
+        self.lot_number_edit = UpperCaseLineEdit(lot_number)
+        self.quantity_edit = FloatLineEdit()
+        self.quantity_edit.setText(str(quantity_kg))
+
+        layout.addRow("Lot Number:", self.lot_number_edit)
+        layout.addRow("Quantity (kg):", self.quantity_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_data(self):
+        return {
+            "lot_number": self.lot_number_edit.text(),
+            "quantity_kg": self.quantity_edit.value()
+        }
+
+
 class ProductDeliveryPage(QWidget):
     def __init__(self, db_engine, username, log_audit_trail_func):
         super().__init__()
@@ -383,7 +427,7 @@ class ProductDeliveryPage(QWidget):
         self.current_page, self.records_per_page = 1, 200
         self.total_records, self.total_pages = 0, 1
         self.printer, self.current_pdf_buffer = QPrinter(), None
-        self.breakdown_preview_data = None
+        self.breakdown_preview_data = []  # Initialize as a list for accumulation
         self.unit_list, self.prod_code_list = [], []
 
         self.workstation_details = self._get_workstation_details()
@@ -488,7 +532,7 @@ class ProductDeliveryPage(QWidget):
     def _setup_breakdown_records_tab(self, tab):
         layout = QVBoxLayout(tab)
         instruction_label = QLabel(
-            "<b>Instruction:</b> This tab provides a comprehensive view of all saved lot breakdown records across all Delivery Receipts. Use the search to filter by DR number, lot number, or product code."
+            "<b>Instruction:</b> This tab shows all saved lot breakdowns. To modify a breakdown, right-click the desired record and select 'Modify Breakdown for this DR'. You can also delete individual lots."
         )
         instruction_label.setStyleSheet(INSTRUCTION_STYLE)
         layout.addWidget(instruction_label)
@@ -498,7 +542,10 @@ class ProductDeliveryPage(QWidget):
         self.breakdown_search_edit = UpperCaseLineEdit(placeholderText="Filter by DR No, Lot No, Product Code...")
         top_layout.addWidget(self.breakdown_search_edit, 1)
         refresh_btn = QPushButton(fa.icon('fa5s.sync', color=ICON_COLOR), "Refresh")
+        self.breakdown_delete_btn = QPushButton(fa.icon('fa5s.trash-alt', color='#e63946'), "Delete Selected Lot")
+        self.breakdown_delete_btn.setObjectName("DeleteButton")
         top_layout.addWidget(refresh_btn)
+        top_layout.addWidget(self.breakdown_delete_btn)
         layout.addLayout(top_layout)
         self.breakdown_records_table = QTableWidget()
         self.breakdown_records_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -506,8 +553,11 @@ class ProductDeliveryPage(QWidget):
         self.breakdown_records_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.breakdown_records_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.breakdown_records_table.verticalHeader().setVisible(False)
+        self.breakdown_records_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         layout.addWidget(self.breakdown_records_table)
         refresh_btn.clicked.connect(self._load_breakdown_records_data)
+        self.breakdown_delete_btn.clicked.connect(self._delete_lot_breakdown_record)
+        self.breakdown_records_table.customContextMenuRequested.connect(self._show_breakdown_records_context_menu)
         self.breakdown_search_edit.textChanged.connect(self._load_breakdown_records_data)
 
     def _toggle_camera(self):
@@ -656,18 +706,24 @@ class ProductDeliveryPage(QWidget):
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 5, 0)
         main_splitter.addWidget(left_widget)
-        fetch_dr_group = QGroupBox("1. Select or Enter Delivery Receipt")
+        fetch_dr_group = QGroupBox("1. Select Delivery and Product")
         fetch_dr_layout = QVBoxLayout(fetch_dr_group)
+
         instruction_label = QLabel(
-            "<b>Note:</b> Select a DR to add breakdown records. Saving appends 'QTY OUT' inventory transactions."
+            "<b>Note:</b> Build your breakdown in the preview table. Use 'Edit'/'Remove' or double-click to modify the preview. "
+            "Saving replaces the <b>entire breakdown for the selected DR</b> with the current contents of the preview table."
         )
         instruction_label.setStyleSheet(SHORT_INSTRUCTION_STYLE)
         fetch_dr_layout.addWidget(instruction_label)
+
         form_layout_dr = QFormLayout()
         self.breakdown_dr_no_combo = QComboBox()
         self.breakdown_dr_no_combo.setEditable(True)
+        self.breakdown_prod_code_combo = QComboBox()
+        self.breakdown_prod_code_combo.setEnabled(False)
         self.breakdown_dr_qty_display = FloatLineEdit()
         form_layout_dr.addRow("DR Number:", self.breakdown_dr_no_combo)
+        form_layout_dr.addRow("Product Code (for previewing):", self.breakdown_prod_code_combo)
         form_layout_dr.addRow("Target Quantity (kg):", self.breakdown_dr_qty_display)
         fetch_dr_layout.addLayout(form_layout_dr)
         left_layout.addWidget(fetch_dr_group)
@@ -697,9 +753,20 @@ class ProductDeliveryPage(QWidget):
         self.breakdown_preview_table = QTableWidget(editTriggers=QAbstractItemView.EditTrigger.NoEditTriggers)
         self.breakdown_preview_table.verticalHeader().setVisible(False)
         self.breakdown_preview_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.breakdown_preview_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.breakdown_total_label = QLabel("<b>Total: 0.00 kg</b>")
         self.breakdown_total_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         breakdown_preview_layout.addWidget(self.breakdown_preview_table)
+
+        preview_button_layout = QHBoxLayout()
+        self.breakdown_edit_btn = QPushButton(fa.icon('fa5s.edit', color=ICON_COLOR), "Edit Selected")
+        self.breakdown_remove_btn = QPushButton(fa.icon('fa5s.trash-alt', color='#e63946'), "Remove Selected")
+        self.breakdown_remove_btn.setObjectName("DeleteButton")
+        preview_button_layout.addStretch()
+        preview_button_layout.addWidget(self.breakdown_edit_btn)
+        preview_button_layout.addWidget(self.breakdown_remove_btn)
+        breakdown_preview_layout.addLayout(preview_button_layout)
+
         breakdown_preview_layout.addWidget(self.breakdown_total_label)
         right_layout.addWidget(breakdown_preview_group)
         main_splitter.setSizes([500, 600])
@@ -715,11 +782,20 @@ class ProductDeliveryPage(QWidget):
         left_layout.addLayout(button_layout)
         self.breakdown_dr_no_combo.lineEdit().editingFinished.connect(self._on_breakdown_dr_selected)
         self.breakdown_dr_no_combo.currentIndexChanged.connect(self._on_breakdown_dr_selected)
+        self.breakdown_prod_code_combo.currentIndexChanged.connect(self._on_breakdown_product_selected)
         self.breakdown_weight_per_lot_edit.textChanged.connect(self._recalculate_num_lots)
         self.breakdown_dr_qty_display.textChanged.connect(self._recalculate_num_lots)
         preview_btn.clicked.connect(self._preview_lot_breakdown)
         clear_btn.clicked.connect(self._clear_breakdown_tool)
         self.breakdown_save_btn.clicked.connect(self._save_lot_breakdown_to_db)
+
+        self.breakdown_preview_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.breakdown_preview_table.customContextMenuRequested.connect(self._show_breakdown_preview_context_menu)
+        self.breakdown_preview_table.doubleClicked.connect(self._edit_preview_lot)
+        self.breakdown_preview_table.itemSelectionChanged.connect(self._on_preview_selection_changed)
+        self.breakdown_edit_btn.clicked.connect(self._edit_preview_lot)
+        self.breakdown_remove_btn.clicked.connect(self._remove_preview_lot)
+        self._on_preview_selection_changed()  # Set initial state
 
     def _setup_view_tab(self, tab):
         layout = QVBoxLayout(tab)
@@ -918,6 +994,7 @@ class ProductDeliveryPage(QWidget):
         self.clear_btn = QPushButton(fa.icon('fa5s.eraser', color=ICON_COLOR), "New")
         self.save_btn = QPushButton(fa.icon('fa5s.save', color=ICON_COLOR), "Save")
         self.save_btn.setObjectName("SaveButton")
+        self.save_btn.setAutoDefault(False)  # FIX: Prevents accidental saves on Enter press
         self.print_btn = QPushButton(fa.icon('fa5s.print', color=ICON_COLOR), "Print Preview")
         action_button_layout.addStretch();
         action_button_layout.addWidget(self.cancel_update_btn);
@@ -1008,7 +1085,7 @@ class ProductDeliveryPage(QWidget):
                     "SELECT id, quantity, unit, product_code, product_color, no_of_packing, weight_per_pack, lot_no_1, lot_no_2, lot_no_3, attachments, unit_price FROM product_delivery_items WHERE dr_no = :dr_no ORDER BY id"),
                     {"dr_no": dr_no}).mappings().all()
                 breakdown = conn.execute(text(
-                    "SELECT lot_number, quantity_kg FROM product_delivery_lot_breakdown WHERE dr_no = :dr_no ORDER BY id"),
+                    "SELECT product_code, lot_number, quantity_kg FROM product_delivery_lot_breakdown WHERE dr_no = :dr_no ORDER BY id"),
                     {"dr_no": dr_no}).mappings().all()
             for layout in [self.view_left_details_layout, self.view_right_details_layout]:
                 while layout.count():
@@ -1021,7 +1098,7 @@ class ProductDeliveryPage(QWidget):
             item_headers = ["ID", "Qty", "Unit", "Code", "Color", "Packing", "Wt/Pack", "Lot 1", "Lot 2", "Lot 3",
                             "Attachments", "Price"]
             self._populate_table_generic(self.view_items_table, items, item_headers)
-            breakdown_headers = ["Lot Number", "Quantity (kg)"]
+            breakdown_headers = ["Product Code", "Lot Number", "Quantity (kg)"]
             self._populate_table_generic(self.view_breakdown_table, breakdown, breakdown_headers)
         except Exception as e:
             QMessageBox.critical(self, "DB Error", f"Could not load details for DR {dr_no}: {e}")
@@ -1232,7 +1309,7 @@ class ProductDeliveryPage(QWidget):
                 if self.current_editing_dr_no:
                     del primary_data['encoded_by'], primary_data['encoded_on']
                     update_query = text(
-                        "UPDATE product_delivery_primary SET dr_type=:dr_type, delivery_date=:delivery_date, customer_name=:customer_name, deliver_to=:deliver_to, address=:address, po_no=:po_no, order_form_no=:order_form_no, terms=:terms, prepared_by=:prepared_by, edited_by=:edited_by, edited_on=:edited_on WHERE dr_no=:dr_no")
+                        "UPDATE product_delivery_primary SET delivery_date=:delivery_date, customer_name=:customer_name, deliver_to=:deliver_to, address=:address, po_no=:po_no, order_form_no=:order_form_no, terms=:terms, prepared_by=:prepared_by, edited_by=:edited_by, edited_on=:edited_on WHERE dr_no=:dr_no")
                     conn.execute(update_query, primary_data)
                     conn.execute(text("DELETE FROM product_delivery_items WHERE dr_no = :dr_no"), {"dr_no": dr_no})
                     log, action = "UPDATE_DELIVERY", "updated"
@@ -1244,26 +1321,48 @@ class ProductDeliveryPage(QWidget):
 
                 items_to_insert = []
                 for item in items_data:
+                    def safe_float(s):
+                        if not s: return 0.0
+                        try:
+                            return float(str(s).replace(',', ''))
+                        except (ValueError, TypeError):
+                            return 0.0
+
+                    # --- START: FIX ---
+                    # This function is now more robust. It first converts the string to a float
+                    # to handle inputs like "60.00", and then converts that float to an int.
+                    def safe_int(s):
+                        if not s: return 0
+                        try:
+                            return int(float(str(s).replace(',', '')))
+                        except (ValueError, TypeError):
+                            return 0
+                    # --- END: FIX ---
+
                     clean_item = {
                         'dr_no': item.get('dr_no'),
-                        'quantity': item.get('quantity', '0').replace(',', ''),
-                        'unit': item.get('unit'), 'product_code': item.get('product_code'),
-                        'product_color': item.get('product_color'), 'no_of_packing': item.get('no_of_packing'),
-                        'weight_per_pack': item.get('weight_per_pack', '0').replace(',', ''),
+                        'quantity': safe_float(item.get('quantity')),
+                        'unit': item.get('unit'),
+                        'product_code': item.get('product_code'),
+                        'product_color': item.get('product_color'),
+                        'no_of_packing': safe_int(item.get('no_of_packing')),
+                        'weight_per_pack': safe_float(item.get('weight_per_pack')),
                         'attachments': item.get('attachments'),
-                        'unit_price': item.get('unit_price', '0').replace(',', ''),
-                        'lot_no_1': item.get('lot_no_1'), 'lot_no_2': item.get('lot_no_2'),
-                        'lot_no_3': item.get('lot_no_3'), 'description_1': item.get('description_1', ''),
-                        'description_2': item.get('description_2', '')}
+                        'unit_price': safe_float(item.get('unit_price')),
+                        'lot_no_1': item.get('lot_no_1'),
+                        'lot_no_2': item.get('lot_no_2'),
+                        'lot_no_3': item.get('lot_no_3')
+                    }
                     items_to_insert.append(clean_item)
+
                 if items_to_insert:
                     conn.execute(text("""
-                        INSERT INTO product_delivery_items (dr_no, quantity, unit, product_code, product_color, 
+                        INSERT INTO product_delivery_items (dr_no, quantity, unit, product_code, product_color,
                         no_of_packing, weight_per_pack, attachments, unit_price,
-                        lot_no_1, lot_no_2, lot_no_3, description_1, description_2) 
-                        VALUES (:dr_no, :quantity, :unit, :product_code, :product_color, :no_of_packing, 
+                        lot_no_1, lot_no_2, lot_no_3)
+                        VALUES (:dr_no, :quantity, :unit, :product_code, :product_color, :no_of_packing,
                         :weight_per_pack, :attachments, :unit_price,
-                        :lot_no_1, :lot_no_2, :lot_no_3, :description_1, :description_2)
+                        :lot_no_1, :lot_no_2, :lot_no_3)
                     """), items_to_insert)
                 self.log_audit_trail(log, f"Delivery Receipt: {dr_no}")
             QMessageBox.information(self, "Success",
@@ -1344,11 +1443,8 @@ class ProductDeliveryPage(QWidget):
                             text("SELECT delivery_date FROM product_delivery_primary WHERE dr_no = :dr"),
                             {"dr": dr_no}).mappings().one()
                         breakdown_data = conn.execute(text(
-                            "SELECT lot_number, quantity_kg FROM product_delivery_lot_breakdown WHERE dr_no = :dr"),
+                            "SELECT lot_number, product_code, quantity_kg FROM product_delivery_lot_breakdown WHERE dr_no = :dr"),
                             {"dr": dr_no}).mappings().all()
-                        product_code = conn.execute(
-                            text("SELECT product_code FROM product_delivery_items WHERE dr_no = :dr LIMIT 1"),
-                            {"dr": dr_no}).scalar_one_or_none()
 
                         conn.execute(text(
                             "UPDATE product_delivery_primary SET is_deleted = TRUE, edited_by = :u, edited_on = :n WHERE dr_no = :dr"),
@@ -1361,14 +1457,16 @@ class ProductDeliveryPage(QWidget):
                             reversal_transactions.append({
                                 "date": primary_data['delivery_date'], "type": "DELIVERY_DELETED (RETURN)",
                                 "ref": dr_no,
-                                "pcode": product_code, "lot": item['lot_number'], "qty_in": item['quantity_kg'],
+                                "pcode": item['product_code'], "lot": item['lot_number'],
+                                "qty_in": item['quantity_kg'],
                                 "qty_out": 0,
                                 "unit": "KG.", "user": self.username,
+                                "encoded_on": datetime.now(),
                                 "remarks": f"Stock returned on deletion of DR {dr_no}"
                             })
                         if reversal_transactions:
-                            conn.execute(text("""INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, encoded_by, remarks) 
-                                                 VALUES (:date, :type, :ref, :pcode, :lot, :qty_in, :qty_out, :unit, :user, :remarks)"""),
+                            conn.execute(text("""INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, encoded_by, encoded_on, remarks)
+                                                 VALUES (:date, :type, :ref, :pcode, :lot, :qty_in, :qty_out, :unit, :user, :encoded_on, :remarks)"""),
                                          reversal_transactions)
 
                     self.log_audit_trail("DELETE_DELIVERY",
@@ -1392,11 +1490,9 @@ class ProductDeliveryPage(QWidget):
                         text("SELECT delivery_date FROM product_delivery_primary WHERE dr_no = :dr"),
                         {"dr": dr_no}).mappings().one()
                     breakdown_data = conn.execute(
-                        text("SELECT lot_number, quantity_kg FROM product_delivery_lot_breakdown WHERE dr_no = :dr"),
+                        text(
+                            "SELECT lot_number, product_code, quantity_kg FROM product_delivery_lot_breakdown WHERE dr_no = :dr"),
                         {"dr": dr_no}).mappings().all()
-                    product_code = conn.execute(
-                        text("SELECT product_code FROM product_delivery_items WHERE dr_no = :dr LIMIT 1"),
-                        {"dr": dr_no}).scalar_one_or_none()
 
                     conn.execute(text(
                         "UPDATE product_delivery_primary SET is_deleted = FALSE, edited_by = :u, edited_on = :n WHERE dr_no = :dr"),
@@ -1408,14 +1504,15 @@ class ProductDeliveryPage(QWidget):
                     for item in breakdown_data:
                         original_transactions.append({
                             "date": primary_data['delivery_date'], "type": "DELIVERY", "ref": dr_no,
-                            "pcode": product_code,
+                            "pcode": item['product_code'],
                             "lot": item['lot_number'], "qty_in": 0, "qty_out": item['quantity_kg'], "unit": "KG.",
                             "user": self.username,
+                            "encoded_on": datetime.now(),
                             "remarks": f"Delivery for DR {dr_no} (Restored)"
                         })
                     if original_transactions:
-                        conn.execute(text("""INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, encoded_by, remarks) 
-                                             VALUES (:date, :type, :ref, :pcode, :lot, :qty_in, :qty_out, :unit, :user, :remarks)"""),
+                        conn.execute(text("""INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, encoded_by, encoded_on, remarks)
+                                             VALUES (:date, :type, :ref, :pcode, :lot, :qty_in, :qty_out, :unit, :user, :encoded_on, :remarks)"""),
                                      original_transactions)
 
                 self.log_audit_trail("RESTORE_DELIVERY", f"Restored DR: {dr_no}")
@@ -1596,12 +1693,14 @@ class ProductDeliveryPage(QWidget):
         self.breakdown_is_range_check.setChecked(False)
         self.breakdown_preview_table.setRowCount(0)
         self.breakdown_total_label.setText("<b>Total: 0.00 kg</b>")
-        self.breakdown_preview_data = None
+        self.breakdown_preview_data = []
 
     def _clear_breakdown_tool(self):
         self.breakdown_dr_no_combo.blockSignals(True)
         self.breakdown_dr_no_combo.setCurrentIndex(0)
         self.breakdown_dr_no_combo.blockSignals(False)
+        self.breakdown_prod_code_combo.clear()
+        self.breakdown_prod_code_combo.setEnabled(False)
         self.breakdown_dr_qty_display.setText("0.00")
         self._clear_breakdown_inputs()
 
@@ -1618,37 +1717,68 @@ class ProductDeliveryPage(QWidget):
             QMessageBox.critical(self, "DB Error", f"Could not load DR numbers for breakdown tool: {e}")
 
     def _on_breakdown_dr_selected(self):
-        self.breakdown_preview_table.setRowCount(0)
-        self.breakdown_total_label.setText("<b>Total: 0.00 kg</b>")
-        self.breakdown_preview_data = None
+        self._clear_breakdown_inputs()
+        self.breakdown_prod_code_combo.clear()
+        self.breakdown_dr_qty_display.setText("0.00")
+
         dr_no = self.breakdown_dr_no_combo.currentText().strip()
         if not dr_no or dr_no == "-- Select a DR --":
-            self.breakdown_dr_qty_display.setText("0.00")
-            self._recalculate_num_lots()
+            self.breakdown_prod_code_combo.setEnabled(False)
             return
+
         try:
             with self.engine.connect() as conn:
-                query_total = text(
-                    "SELECT SUM(i.quantity) as total_quantity FROM product_delivery_items i WHERE i.dr_no = :dr_no")
-                result = conn.execute(query_total, {"dr_no": dr_no}).scalar_one_or_none()
-                total_qty = Decimal(result or "0.00")
+                query_prods = text(
+                    "SELECT DISTINCT product_code FROM product_delivery_items WHERE dr_no = :dr_no ORDER BY product_code"
+                )
+                product_codes = conn.execute(query_prods, {"dr_no": dr_no}).scalars().all()
+
                 query_existing = text(
-                    "SELECT lot_number, quantity_kg FROM product_delivery_lot_breakdown WHERE dr_no = :dr_no ORDER BY id"
+                    "SELECT product_code, lot_number, quantity_kg FROM product_delivery_lot_breakdown WHERE dr_no = :dr_no ORDER BY id"
                 )
                 existing_records = conn.execute(query_existing, {"dr_no": dr_no}).mappings().all()
 
-            self.breakdown_dr_qty_display.setText(f"{total_qty:,.2f}")
+            if product_codes:
+                self.breakdown_prod_code_combo.blockSignals(True)
+                self.breakdown_prod_code_combo.addItems(product_codes)
+                self.breakdown_prod_code_combo.blockSignals(False)
+                self.breakdown_prod_code_combo.setEnabled(True)
+                self._on_breakdown_product_selected()
+            else:
+                self.breakdown_prod_code_combo.setEnabled(False)
+                QMessageBox.information(self, "No Items", f"DR {dr_no} does not contain any items to break down.")
+
             if existing_records:
                 self.breakdown_preview_data = [dict(row) for row in existing_records]
-                self._populate_preview_table(self.breakdown_preview_table, self.breakdown_preview_data,
-                                             ["Lot Number", "Quantity (kg)"])
-                total_preview_qty = sum(
-                    Decimal(str(item.get('quantity_kg', '0'))) for item in self.breakdown_preview_data)
-                self.breakdown_total_label.setText(f"<b>Total: {float(total_preview_qty):,.2f} kg</b>")
-            self._recalculate_num_lots()
+                self._update_breakdown_preview_display()
+
         except Exception as e:
+            self.breakdown_prod_code_combo.setEnabled(False)
             self.breakdown_dr_qty_display.setText("0.00")
             QMessageBox.critical(self, "Database Error", f"An error occurred while fetching DR data: {e}")
+
+    def _on_breakdown_product_selected(self):
+        """Fetches the target quantity for the selected product code within the selected DR."""
+        dr_no = self.breakdown_dr_no_combo.currentText().strip()
+        product_code = self.breakdown_prod_code_combo.currentText().strip()
+
+        if not dr_no or not product_code or dr_no == "-- Select a DR --":
+            self.breakdown_dr_qty_display.setText("0.00")
+            return
+
+        try:
+            with self.engine.connect() as conn:
+                query_qty = text(
+                    "SELECT SUM(quantity) FROM product_delivery_items WHERE dr_no = :dr_no AND product_code = :pcode"
+                )
+                total_qty = conn.execute(query_qty, {"dr_no": dr_no, "pcode": product_code}).scalar_one_or_none()
+
+            self.breakdown_dr_qty_display.setText(f"{Decimal(total_qty or '0.00'):,.2f}")
+            self._recalculate_num_lots()
+
+        except Exception as e:
+            self.breakdown_dr_qty_display.setText("0.00")
+            QMessageBox.critical(self, "Database Error", f"Could not fetch quantity for {product_code}: {e}")
 
     def _recalculate_num_lots(self):
         try:
@@ -1722,67 +1852,179 @@ class ProductDeliveryPage(QWidget):
             QMessageBox.critical(self, "Lot Range Error", f"Could not parse lot range '{lot_input}': {e}")
             return None
 
-    def _preview_lot_breakdown(self):
-        self.breakdown_preview_data = None
+    def _update_breakdown_preview_display(self):
+        """Helper to populate table and total from self.breakdown_preview_data"""
+        headers = ["Product Code", "Lot Number", "Quantity (kg)"]
         self.breakdown_preview_table.setRowCount(0)
-        self.breakdown_total_label.setText("<b>Total: 0.00 kg</b>")
-        breakdown_items = self._validate_and_calculate_breakdown()
-        if not breakdown_items: return
-        self.breakdown_preview_data = breakdown_items
-        self._populate_preview_table(self.breakdown_preview_table, breakdown_items, ["Lot Number", "Quantity (kg)"])
-        total_preview_qty = sum(item['quantity_kg'] for item in breakdown_items)
+        self.breakdown_preview_table.setColumnCount(len(headers))
+        self.breakdown_preview_table.setHorizontalHeaderLabels(headers)
+
+        if self.breakdown_preview_data:
+            self.breakdown_preview_table.setRowCount(len(self.breakdown_preview_data))
+            for i, row_data in enumerate(self.breakdown_preview_data):
+                pcode = row_data.get('product_code', 'N/A')
+                lot = row_data.get('lot_number', '')
+                qty_val = row_data.get('quantity_kg', 0)
+                qty_str = f"{float(qty_val):,.2f}"
+
+                self.breakdown_preview_table.setItem(i, 0, QTableWidgetItem(pcode))
+                self.breakdown_preview_table.setItem(i, 1, QTableWidgetItem(lot))
+                qty_item = QTableWidgetItem(qty_str)
+                qty_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.breakdown_preview_table.setItem(i, 2, qty_item)
+
+        total_preview_qty = sum(Decimal(str(item['quantity_kg'])) for item in self.breakdown_preview_data)
         self.breakdown_total_label.setText(f"<b>Total: {float(total_preview_qty):,.2f} kg</b>")
+
+    def _preview_lot_breakdown(self):
+        product_code = self.breakdown_prod_code_combo.currentText().strip()
+        if not product_code:
+            QMessageBox.warning(self, "No Product Selected", "Please select a product code before previewing.")
+            return
+
+        breakdown_items = self._validate_and_calculate_breakdown()
+        if not breakdown_items:
+            return
+
+        for item in breakdown_items:
+            item['product_code'] = product_code
+
+        existing_lots = {item['lot_number'] for item in self.breakdown_preview_data}
+        new_items_to_add = [item for item in breakdown_items if item['lot_number'] not in existing_lots]
+
+        if len(new_items_to_add) < len(breakdown_items):
+            QMessageBox.warning(self, "Duplicate Lots", "Some lots were duplicates and have been ignored.")
+
+        self.breakdown_preview_data.extend(new_items_to_add)
+        self._update_breakdown_preview_display()
+
+    def _on_preview_selection_changed(self):
+        """Enables or disables preview modification buttons based on selection."""
+        is_selected = bool(self.breakdown_preview_table.selectionModel().selectedRows())
+        self.breakdown_edit_btn.setEnabled(is_selected)
+        self.breakdown_remove_btn.setEnabled(is_selected)
+
+    def _edit_preview_lot(self):
+        """Opens a dialog to edit the selected lot in the preview table."""
+        selected_rows = self.breakdown_preview_table.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+
+        row_index = selected_rows[0].row()
+        item_data = self.breakdown_preview_data[row_index]
+
+        dialog = EditLotDialog(item_data['lot_number'], item_data['quantity_kg'], self)
+        if dialog.exec():
+            new_data = dialog.get_data()
+            self.breakdown_preview_data[row_index]['lot_number'] = new_data['lot_number']
+            self.breakdown_preview_data[row_index]['quantity_kg'] = new_data['quantity_kg']
+            self._update_breakdown_preview_display()
+
+    def _remove_preview_lot(self):
+        """Removes the selected lot from the preview table."""
+        selected_rows = self.breakdown_preview_table.selectionModel().selectedRows()
+        if not selected_rows:
+            return
+
+        row_index = selected_rows[0].row()
+        item_data = self.breakdown_preview_data[row_index]
+        lot_number = item_data.get('lot_number', 'N/A')
+
+        reply = QMessageBox.question(self, "Confirm Remove",
+                                     f"Remove lot <b>{lot_number}</b> from the preview?<br><br>This action is temporary and will only be finalized when you click 'Save Breakdown'.",
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            del self.breakdown_preview_data[row_index]
+            self._update_breakdown_preview_display()
+
+    def _show_breakdown_preview_context_menu(self, pos):
+        """Shows a context menu for the breakdown preview table."""
+        if not self.breakdown_preview_table.selectionModel().selectedRows():
+            return
+
+        menu = QMenu()
+        edit_action = menu.addAction(fa.icon('fa5s.edit', color=ICON_COLOR), "Edit Lot")
+        remove_action = menu.addAction(fa.icon('fa5s.trash-alt', color='#e63946'), "Remove Lot")
+
+        action = menu.exec(self.breakdown_preview_table.mapToGlobal(pos))
+
+        if action == edit_action:
+            self._edit_preview_lot()
+        elif action == remove_action:
+            self._remove_preview_lot()
 
     def _save_lot_breakdown_to_db(self):
         dr_no = self.breakdown_dr_no_combo.currentText().strip()
+
         if not dr_no or dr_no == "-- Select a DR --":
-            QMessageBox.warning(self, "No DR Selected",
-                                "Please select or enter a Delivery Receipt to save the breakdown to.")
+            QMessageBox.warning(self, "No DR Selected", "Please select a Delivery Receipt.")
             return
-        if not self.breakdown_preview_data:
-            QMessageBox.warning(self, "No Preview Data", "Please generate a preview of the breakdown before saving.")
+
+        items_to_save = self.breakdown_preview_data
+
+        if not items_to_save:
+            QMessageBox.warning(self, "No Data to Save", "The preview table is empty.")
             return
-        reply = QMessageBox.question(self, "Confirm Add Breakdown",
-                                     f"This will <b>add the previewed records</b> to DR {dr_no} and create corresponding inventory transactions. This action cannot be easily undone.\n\nAre you sure you want to proceed?",
+
+        reply = QMessageBox.question(self, "Confirm Save Breakdown",
+                                     f"This will <b>REPLACE THE ENTIRE</b> existing breakdown for DR <b>{dr_no}</b> with the {len(items_to_save)} item(s) in the preview table. All corresponding inventory transactions will be reset.\n\nAre you sure you want to proceed?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        if reply == QMessageBox.StandardButton.Cancel: return
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+
         try:
             with self.engine.connect() as conn, conn.begin():
                 primary_data = conn.execute(
                     text("SELECT delivery_date FROM product_delivery_primary WHERE dr_no = :dr"),
                     {"dr": dr_no}).mappings().one_or_none()
                 if not primary_data:
-                    QMessageBox.critical(self, "Data Error", f"DR {dr_no} does not exist. Cannot save breakdown.")
+                    QMessageBox.critical(self, "Data Error", f"DR {dr_no} does not exist.")
                     return
-                product_code = conn.execute(
-                    text("SELECT product_code FROM product_delivery_items WHERE dr_no = :dr LIMIT 1"),
-                    {"dr": dr_no}).scalar_one_or_none()
-                if not product_code:
-                    QMessageBox.critical(self, "Data Error", f"DR {dr_no} has no items. Cannot save breakdown.")
-                    return
-                insert_data = [{"dr_no": dr_no, "lot_number": item['lot_number'], "quantity_kg": item['quantity_kg']}
-                               for item in self.breakdown_preview_data]
+
+                delete_params = {"dr_no": dr_no}
+                conn.execute(
+                    text("DELETE FROM product_delivery_lot_breakdown WHERE dr_no = :dr_no"),
+                    delete_params)
+                conn.execute(
+                    text("DELETE FROM transactions WHERE source_ref_no = :dr_no AND transaction_type = 'DELIVERY'"),
+                    delete_params)
+
+                insert_data = [
+                    {
+                        "dr_no": dr_no,
+                        "product_code": item['product_code'],
+                        "lot_number": item['lot_number'],
+                        "quantity_kg": item['quantity_kg']
+                    } for item in items_to_save
+                ]
+
                 if insert_data:
                     conn.execute(text(
-                        "INSERT INTO product_delivery_lot_breakdown (dr_no, lot_number, quantity_kg) VALUES (:dr_no, :lot_number, :quantity_kg)"),
+                        "INSERT INTO product_delivery_lot_breakdown (dr_no, product_code, lot_number, quantity_kg) VALUES (:dr_no, :product_code, :lot_number, :quantity_kg)"),
                         insert_data)
+
                 transactions = []
-                for item in self.breakdown_preview_data:
+                current_time = datetime.now()
+                for item in items_to_save:
                     transactions.append({
-                        "date": primary_data['delivery_date'], "type": "DELIVERY", "ref": dr_no, "pcode": product_code,
+                        "date": primary_data['delivery_date'], "type": "DELIVERY", "ref": dr_no,
+                        "pcode": item['product_code'],
                         "lot": item['lot_number'], "qty_in": 0, "qty_out": item['quantity_kg'], "unit": "KG.",
                         "user": self.username,
+                        "encoded_on": current_time,
                         "remarks": f"Delivery for DR {dr_no}"
                     })
                 if transactions:
-                    conn.execute(text("""INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, encoded_by, remarks) 
-                                         VALUES (:date, :type, :ref, :pcode, :lot, :qty_in, :qty_out, :unit, :user, :remarks)"""),
+                    conn.execute(text("""INSERT INTO transactions (transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_in, quantity_out, unit, encoded_by, encoded_on, remarks)
+                                         VALUES (:date, :type, :ref, :pcode, :lot, :qty_in, :qty_out, :unit, :user, :encoded_on, :remarks)"""),
                                  transactions)
 
-                self.log_audit_trail("ADD_LOT_BREAKDOWN",
-                                     f"Added lot breakdown records and transactions for DR: {dr_no}")
+                self.log_audit_trail("SAVE_LOT_BREAKDOWN",
+                                     f"Saved/Replaced entire breakdown for DR: {dr_no}")
                 QMessageBox.information(self, "Success",
-                                        f"Lot breakdown records for DR {dr_no} have been added successfully.")
+                                        f"The complete lot breakdown for DR {dr_no} has been saved.")
+
                 self._clear_breakdown_inputs()
                 self._on_breakdown_dr_selected()
         except Exception as e:
@@ -1847,31 +2089,29 @@ class ProductDeliveryPage(QWidget):
         try:
             with self.engine.connect() as conn:
                 like_operator = "LIKE" if self.engine.dialect.name == 'sqlite' else "ILIKE"
-
-                # --- FIX: Replaced alias in WHERE clause with the actual subquery ---
                 sql = text(f"""
-                    SELECT 
-                        b.dr_no, 
-                        p.delivery_date, 
-                        p.customer_name, 
-                        (SELECT i.product_code FROM product_delivery_items i WHERE i.dr_no = b.dr_no LIMIT 1) as product_code,
-                        b.lot_number, 
+                    SELECT
+                        b.dr_no,
+                        p.delivery_date,
+                        p.customer_name,
+                        b.product_code,
+                        b.lot_number,
                         b.quantity_kg,
-                        p.encoded_by,
-                        p.encoded_on
-                    FROM 
+                        t.encoded_by,
+                        t.encoded_on
+                    FROM
                         product_delivery_lot_breakdown b
-                    JOIN 
+                    JOIN
                         product_delivery_primary p ON b.dr_no = p.dr_no
-                    WHERE 
-                        b.dr_no {like_operator} :search OR 
+                    LEFT JOIN
+                        transactions t ON b.dr_no = t.source_ref_no AND b.lot_number = t.lot_number AND t.transaction_type = 'DELIVERY'
+                    WHERE
+                        b.dr_no {like_operator} :search OR
                         b.lot_number {like_operator} :search OR
-                        (SELECT i.product_code FROM product_delivery_items i WHERE i.dr_no = b.dr_no LIMIT 1) {like_operator} :search
-                    ORDER BY 
+                        b.product_code {like_operator} :search
+                    ORDER BY
                         p.id DESC, b.id DESC
                 """)
-                # --- END FIX ---
-
                 results = conn.execute(sql, {"search": search_text}).mappings().all()
 
             headers = ["DR No.", "Date", "Customer", "Product Code", "Lot Number", "Quantity (kg)", "Encoded By",
@@ -1887,18 +2127,18 @@ class ProductDeliveryPage(QWidget):
                 date_val = record.get('delivery_date')
                 date_str = QDate(date_val).toString('yyyy-MM-dd') if date_val else ""
                 table.setItem(row, 1, QTableWidgetItem(date_str))
-                table.setItem(row, 2, QTableWidgetItem(record['customer_name']))
+                table.setItem(row, 2, QTableWidgetItem(record.get('customer_name')))
                 table.setItem(row, 3, QTableWidgetItem(record.get('product_code', 'N/A')))
-                table.setItem(row, 4, QTableWidgetItem(record['lot_number']))
+                table.setItem(row, 4, QTableWidgetItem(record.get('lot_number')))
 
                 qty_val = record.get('quantity_kg')
                 qty_item = QTableWidgetItem(f"{float(qty_val):,.2f}" if qty_val is not None else "0.00")
                 qty_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row, 5, qty_item)
 
-                table.setItem(row, 6, QTableWidgetItem(record['encoded_by']))
+                table.setItem(row, 6, QTableWidgetItem(record.get('encoded_by')))
 
-                dt_val = record['encoded_on']
+                dt_val = record.get('encoded_on')
                 dt_str = QDateTime(dt_val).toString("yyyy-MM-dd hh:mm AP") if dt_val else ""
                 table.setItem(row, 7, QTableWidgetItem(dt_str))
 
@@ -1908,6 +2148,101 @@ class ProductDeliveryPage(QWidget):
         except Exception as e:
             if "no such table" not in str(e).lower():
                 QMessageBox.critical(self, "Database Error", f"Could not load breakdown records: {e}")
+
+    # --- MODIFIED V4.6 ---
+    def _show_breakdown_records_context_menu(self, pos):
+        if not self.breakdown_records_table.selectedItems():
+            return
+
+        menu = QMenu()
+
+        # New action to provide the "edit" workflow
+        modify_action = menu.addAction(fa.icon('fa5s.edit', color=ICON_COLOR), "Modify Breakdown for this DR")
+        menu.addSeparator()
+        delete_action = menu.addAction(fa.icon('fa5s.trash-alt', color='#e63946'), "Delete Selected Lot")
+
+        action = menu.exec(self.breakdown_records_table.mapToGlobal(pos))
+
+        if action == delete_action:
+            self._delete_lot_breakdown_record()
+        elif action == modify_action:
+            self._load_dr_for_modification_from_records()
+
+    # --- NEW V4.6 ---
+    def _load_dr_for_modification_from_records(self):
+        """A shortcut to load a DR into the breakdown tool from the records tab."""
+        selected = self.breakdown_records_table.selectionModel().selectedRows()
+        if not selected:
+            return
+
+        row = selected[0].row()
+        dr_no_to_load = self.breakdown_records_table.item(row, 0).text()
+
+        # Find the "Lot Breakdown Tool" tab by its text
+        breakdown_tab_index = -1
+        for i in range(self.tab_widget.count()):
+            if self.tab_widget.tabText(i) == "Lot Breakdown Tool":
+                breakdown_tab_index = i
+                break
+
+        if breakdown_tab_index == -1:
+            QMessageBox.critical(self, "Error", "Could not find the Lot Breakdown Tool tab.")
+            return
+
+        # Switch to the tab
+        self.tab_widget.setCurrentIndex(breakdown_tab_index)
+
+        # Find and set the DR number in the combobox
+        # This will trigger the _on_breakdown_dr_selected signal, which loads all the data
+        index = self.breakdown_dr_no_combo.findText(dr_no_to_load, Qt.MatchFlag.MatchFixedString)
+        if index >= 0:
+            self.breakdown_dr_no_combo.setCurrentIndex(index)
+        else:
+            QMessageBox.warning(self, "Not Found", f"Could not find DR {dr_no_to_load} in the breakdown tool's list.")
+
+    def _delete_lot_breakdown_record(self):
+        selected = self.breakdown_records_table.selectionModel().selectedRows()
+        if not selected:
+            QMessageBox.warning(self, "No Selection", "Please select a lot record to delete.")
+            return
+
+        row = selected[0].row()
+        dr_no = self.breakdown_records_table.item(row, 0).text()
+        product_code = self.breakdown_records_table.item(row, 3).text()
+        lot_number = self.breakdown_records_table.item(row, 4).text()
+
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deletion",
+            f"Are you sure you want to permanently delete lot <b>{lot_number}</b> (Product: {product_code}) from DR <b>{dr_no}</b>?<br><br>"
+            "This will also delete the corresponding inventory transaction.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                with self.engine.connect() as conn, conn.begin():
+                    delete_params = {
+                        "dr_no": dr_no,
+                        "pcode": product_code,
+                        "lot_no": lot_number
+                    }
+                    conn.execute(
+                        text(
+                            "DELETE FROM product_delivery_lot_breakdown WHERE dr_no = :dr_no AND product_code = :pcode AND lot_number = :lot_no"),
+                        delete_params
+                    )
+                    conn.execute(
+                        text(
+                            "DELETE FROM transactions WHERE source_ref_no = :dr_no AND product_code = :pcode AND lot_number = :lot_no AND transaction_type = 'DELIVERY'"),
+                        delete_params
+                    )
+                self.log_audit_trail("DELETE_LOT_BREAKDOWN",
+                                     f"Deleted Lot: {lot_number} (PCode: {product_code}) from DR: {dr_no}")
+                QMessageBox.information(self, "Success", f"Lot {lot_number} has been deleted successfully.")
+                self._load_breakdown_records_data()
+            except Exception as e:
+                QMessageBox.critical(self, "Database Error", f"Failed to delete lot record: {e}")
 
     def _update_delivery_status(self):
         dr_no = self.scanner_input.text().strip()
@@ -2028,10 +2363,12 @@ class ProductDeliveryPage(QWidget):
         qr_buffer.seek(0)
         reportlab_qr = ReportLabImage(qr_buffer, width=0.8 * inch, height=0.8 * inch)
         try:
+            # IMPORTANT: Ensure 'arial.ttf' and 'arialbd.ttf' are in the same directory as your script
             pdfmetrics.registerFont(TTFont('Arial', 'arial.ttf'));
             pdfmetrics.registerFont(TTFont('Arial-Bold', 'arialbd.ttf'))
             FONT_NORMAL, FONT_BOLD = 'Arial', 'Arial-Bold'
         except Exception:
+            print("Arial font not found. Falling back to Helvetica.")
             FONT_NORMAL, FONT_BOLD = 'Helvetica', 'Helvetica-Bold'
         styles = getSampleStyleSheet()
         styles.add(ParagraphStyle(name='DRTitle', fontName=FONT_BOLD, fontSize=14, alignment=TA_LEFT))
@@ -2061,8 +2398,10 @@ class ProductDeliveryPage(QWidget):
         Story = []
         left_header_text = "<b>MASTERBATCH PHILIPPINES INC.</b><br/><font size='9'>24 Diamond Road Caloocan Industrial Subdivision, Bo. Kaybiga, Caloocan City, Philippines</font><br/><font size='9'>Tel. Nos.: 8935-9579 / 7758-1207 Telefax: 8374-7085</font><br/><font size='9'>TIN NO.: 238-034-470-000</font>"
         left_header = Paragraph(left_header_text, styles['CustomerData'])
+
         right_header_top_table = Table([[Paragraph("DELIVERY RECEIPT", styles['DRTitle']), reportlab_qr]],
-                                       colWidths=[2.2 * inch, 1.0 * inch], style=[('VALIGN', (0, 0), (-1, -1), 'TOP')])
+                                       colWidths=[2.0 * inch, 1.2 * inch], style=[('VALIGN', (0, 0), (-1, -1), 'TOP')])
+
         right_header_data = [[right_header_top_table], [Table(
             [[Paragraph("No.:", styles['DRLabel']), Paragraph(primary_data['dr_no'], styles['DRNumber'])],
              [Paragraph("Delivery Date:", styles['DRLabel']),
@@ -2143,24 +2482,44 @@ class ProductDeliveryPage(QWidget):
         return buffer
 
     def _handle_paint_request(self, printer: QPrinter):
-        if not self.current_pdf_buffer: return
+        if not self.current_pdf_buffer:
+            return
+
         painter = QPainter()
         if not painter.begin(printer):
             QMessageBox.critical(self, "Print Error", "Could not initialize painter.")
             return
-        self.current_pdf_buffer.seek(0)
-        pdf_doc = fitz.open(stream=self.current_pdf_buffer, filetype="pdf")
-        dpi = 300;
-        zoom = dpi / 72.0;
-        mat = fitz.Matrix(zoom, zoom)
-        page_rect_dev_pixels = printer.pageRect(QPrinter.Unit.DevicePixel)
-        for i, page in enumerate(pdf_doc):
-            if i > 0: printer.newPage()
-            pix = page.get_pixmap(matrix=mat, alpha=False)
-            image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
-            painter.drawImage(page_rect_dev_pixels.toRect(), image, image.rect())
-        pdf_doc.close()
-        painter.end()
+
+        try:
+            self.current_pdf_buffer.seek(0)
+            pdf_doc = fitz.open(stream=self.current_pdf_buffer, filetype="pdf")
+
+            # Use a high DPI for crisp, high-quality rendering. 600 is excellent for most printers.
+            dpi = 600
+            zoom = dpi / 72.0  # PDF standard DPI is 72
+            mat = fitz.Matrix(zoom, zoom)
+
+            # Get the printer's drawing area in pixels
+            page_rect_pixels = printer.pageRect(QPrinter.Unit.DevicePixel)
+
+            for i, page in enumerate(pdf_doc):
+                if i > 0:
+                    printer.newPage()
+
+                # Render the PDF page to a high-resolution pixmap (image)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+
+                # Convert the pixmap to a QImage
+                image = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
+
+                # Draw the high-resolution image onto the printer's page
+                painter.drawImage(page_rect_pixels.toRect(), image, image.rect())
+
+            pdf_doc.close()
+        except Exception as e:
+            QMessageBox.critical(self, "Print Error", f"An error occurred during printing: {e}")
+        finally:
+            painter.end()
 
 
 if __name__ == "__main__":
@@ -2174,9 +2533,9 @@ if __name__ == "__main__":
             conn.execute(text(
                 "CREATE TABLE product_delivery_items (id INTEGER PRIMARY KEY, dr_no TEXT, quantity REAL, unit TEXT, product_code TEXT, product_color TEXT, no_of_packing INTEGER, weight_per_pack REAL, attachments TEXT, unit_price REAL, lot_no_1 TEXT, lot_no_2 TEXT, lot_no_3 TEXT, description_1 TEXT, description_2 TEXT);"))
             conn.execute(text(
-                "CREATE TABLE product_delivery_lot_breakdown (id INTEGER PRIMARY KEY, dr_no TEXT, lot_number TEXT, quantity_kg REAL);"))
+                "CREATE TABLE product_delivery_lot_breakdown (id INTEGER PRIMARY KEY, dr_no TEXT, product_code TEXT, lot_number TEXT, quantity_kg REAL);"))
             conn.execute(text(
-                "CREATE TABLE transactions (id INTEGER PRIMARY KEY, transaction_date DATE, transaction_type TEXT, source_ref_no TEXT, product_code TEXT, lot_number TEXT, quantity_in REAL, quantity_out REAL, unit TEXT, encoded_by TEXT, remarks TEXT);"))
+                "CREATE TABLE transactions (id INTEGER PRIMARY KEY, transaction_date DATE, transaction_type TEXT, source_ref_no TEXT, product_code TEXT, lot_number TEXT, quantity_in REAL, quantity_out REAL, unit TEXT, encoded_by TEXT, encoded_on TIMESTAMP, remarks TEXT);"))
             conn.execute(text(
                 "CREATE TABLE customers (name TEXT UNIQUE, deliver_to TEXT, address TEXT, terms TEXT, is_deleted BOOLEAN DEFAULT FALSE);"))
             conn.execute(text("CREATE TABLE units (name TEXT UNIQUE);"))
@@ -2189,24 +2548,49 @@ if __name__ == "__main__":
             conn.execute(text(
                 "INSERT INTO customers (name, deliver_to, address, terms) VALUES ('TERUMO PHILIPPINES', 'TERUMO PLANT', 'LAGUNA', '30 DAYS');"))
             conn.execute(text(
-                "INSERT INTO customers (name, deliver_to, address, terms) VALUES ('OTHER CUSTOMER', 'WAREHOUSE 1', 'MANILA', 'COD');"))
+                "INSERT INTO customers (name, deliver_to, address, terms) VALUES ('MULTI-PRODUCT INC.', 'WAREHOUSE 1', 'MANILA', 'COD');"))
             conn.execute(text("INSERT INTO units (name) VALUES ('KG.'), ('PCS');"))
             conn.execute(text(
                 "INSERT INTO legacy_production (prod_code, prod_color) VALUES ('PROD-A', 'RED'), ('PROD-A', 'BLUE'), ('PROD-B', 'GREEN');"))
             conn.execute(
-                text("INSERT INTO app_settings (setting_key, setting_value) VALUES ('DR_SEQUENCE_START', '100001');"))
+                text("INSERT INTO app_settings (setting_key, setting_value) VALUES ('DR_SEQUENCE_START', '200001');"))
 
+            # Mock Data for a multi-product DR
             conn.execute(text("""
-                INSERT INTO product_delivery_primary (dr_no, dr_type, delivery_date, customer_name, deliver_to, address, po_no, order_form_no, terms, prepared_by, encoded_by, encoded_on, edited_by, edited_on, is_printed)
-                VALUES ('100001', 'Standard DR', '2024-05-01', 'OTHER CUSTOMER', 'WAREHOUSE 1', 'MANILA', 'PO-123', 'OF-456', 'COD', 'TEST_USER', '2024-05-01 09:00:00', '2024-05-01 09:00:00', 'TEST_USER', '2024-05-01 10:00:00', TRUE);
+                INSERT INTO product_delivery_primary (dr_no, delivery_date, customer_name)
+                VALUES ('200001', '2024-05-10', 'MULTI-PRODUCT INC.');
             """))
             conn.execute(text("""
-                INSERT INTO product_delivery_items (dr_no, quantity, unit, product_code, product_color, no_of_packing, weight_per_pack, attachments, unit_price, lot_no_1, lot_no_2, lot_no_3, description_1, description_2)
-                VALUES ('100001', 100.0, 'KG.', 'PROD-A', 'RED', 5, 20.0, 'Test attachment', 50.0, 'LOT100', NULL, NULL, '', '');
+                INSERT INTO product_delivery_items (dr_no, quantity, unit, product_code, product_color)
+                VALUES ('200001', 150.0, 'KG.', 'PROD-A', 'RED'),
+                       ('200001', 225.0, 'KG.', 'PROD-B', 'GREEN');
             """))
             conn.execute(text("""
-                INSERT INTO product_delivery_lot_breakdown (dr_no, lot_number, quantity_kg)
-                VALUES ('100001', 'LOT100A', 20.0), ('100001', 'LOT100B', 80.0);
+                INSERT INTO product_delivery_lot_breakdown (dr_no, product_code, lot_number, quantity_kg)
+                VALUES ('200001', 'PROD-A', 'LOT-A-001', 150.0);
+            """))
+            conn.execute(text("""
+                INSERT INTO transactions(transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_out, unit)
+                VALUES ('2024-05-10', 'DELIVERY', '200001', 'PROD-A', 'LOT-A-001', 150.0, 'KG.');
+            """))
+
+            # Old Mock Data, updated with product_code
+            conn.execute(text("""
+                INSERT INTO product_delivery_primary (dr_no, dr_type, delivery_date, customer_name, is_printed)
+                VALUES ('100001', 'Standard DR', '2024-05-01', 'TERUMO PHILIPPINES', TRUE);
+            """))
+            conn.execute(text("""
+                INSERT INTO product_delivery_items (dr_no, quantity, unit, product_code, product_color)
+                VALUES ('100001', 100.0, 'KG.', 'PROD-A', 'RED');
+            """))
+            conn.execute(text("""
+                INSERT INTO product_delivery_lot_breakdown (dr_no, product_code, lot_number, quantity_kg)
+                VALUES ('100001', 'PROD-A', 'LOT100A', 20.0), ('100001', 'PROD-A', 'LOT100B', 80.0);
+            """))
+            conn.execute(text("""
+                INSERT INTO transactions(transaction_date, transaction_type, source_ref_no, product_code, lot_number, quantity_out, unit)
+                VALUES ('2024-05-01', 'DELIVERY', '100001', 'PROD-A', 'LOT100A', 20.0, 'KG.'),
+                       ('2024-05-01', 'DELIVERY', '100001', 'PROD-A', 'LOT100B', 80.0, 'KG.');
             """))
 
             conn.commit()

@@ -220,17 +220,34 @@ class DashboardAnalyticsPage(QWidget):
             self._create_volume_barchart()
             self._create_top_products_chart()
 
-    # --- UPDATED QUERY FOR POSTGRESQL ---
+    # --- MODIFIED: THIS METHOD NOW CORRECTLY INCLUDES beginning inventory ---
     def _fetch_kpi_data(self) -> Dict[str, Any]:
         try:
             with self.engine.connect() as conn:
                 summary_query = text("""
+                    WITH current_stock_calc AS (
+                        -- Beginning Inventory
+                        SELECT
+                            product_code,
+                            qty AS balance
+                        FROM beginv_sheet1
+                        WHERE product_code IS NOT NULL AND TRIM(product_code) <> ''
+
+                        UNION ALL
+
+                        -- Transactions
+                        SELECT
+                            product_code,
+                            (quantity_in - quantity_out) AS balance
+                        FROM transactions
+                        WHERE product_code IS NOT NULL AND TRIM(product_code) <> ''
+                    )
                     SELECT 
-                        (SELECT SUM(quantity_in - quantity_out) FROM transactions) as total_stock,
+                        (SELECT COALESCE(SUM(balance), 0) FROM current_stock_calc) as total_stock,
                         (SELECT COUNT(id) FROM transactions WHERE EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM NOW())) as total_tx_ytd,
                         (SELECT COALESCE(SUM(quantity_in), 0) FROM transactions WHERE EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM NOW())) as total_in_ytd,
                         (SELECT COALESCE(SUM(quantity_out), 0) FROM transactions WHERE EXTRACT(YEAR FROM transaction_date) = EXTRACT(YEAR FROM NOW())) as total_out_ytd,
-                        (SELECT COUNT(DISTINCT product_code) FROM transactions) as unique_products,
+                        (SELECT COUNT(DISTINCT product_code) FROM current_stock_calc WHERE balance > 0) as unique_products,
                         (SELECT COUNT(id) FROM failed_transactions WHERE transaction_date >= NOW() - INTERVAL '30 days') as failed_count;
                 """)
                 result = conn.execute(summary_query).mappings().one()
@@ -271,7 +288,6 @@ class DashboardAnalyticsPage(QWidget):
             QMessageBox.critical(self, "Database Error", f"Failed to load recent activity: {e}")
             self.activity_table.setRowCount(0)
 
-    # --- UPDATED QUERY FOR POSTGRESQL ---
     def _create_flow_chart(self):
         series_in = QLineSeries();
         series_in.setName("Stock IN")
@@ -374,13 +390,36 @@ class DashboardAnalyticsPage(QWidget):
         chart.legend().setVisible(False)
         self.volume_chart_view.setChart(chart)
 
+    # --- MODIFIED: THIS METHOD NOW CORRECTLY CALCULATES STOCK BALANCE ---
     def _create_top_products_chart(self):
         series = QBarSeries()
+
         query = text("""
-            SELECT product_code, SUM(quantity_in - quantity_out) as stock_balance 
-            FROM transactions GROUP BY product_code HAVING SUM(quantity_in - quantity_out) > 0 
-            ORDER BY stock_balance DESC LIMIT 10;
+            WITH current_stock_calc AS (
+                -- Beginning Inventory
+                SELECT
+                    product_code,
+                    qty AS balance
+                FROM beginv_sheet1
+                WHERE product_code IS NOT NULL AND TRIM(product_code) <> ''
+
+                UNION ALL
+
+                -- Transactions
+                SELECT
+                    product_code,
+                    (quantity_in - quantity_out) AS balance
+                FROM transactions
+                WHERE product_code IS NOT NULL AND TRIM(product_code) <> ''
+            )
+            SELECT product_code, SUM(balance) as stock_balance 
+            FROM current_stock_calc 
+            GROUP BY product_code 
+            HAVING SUM(balance) > 0.001
+            ORDER BY stock_balance DESC 
+            LIMIT 10;
         """)
+
         categories, max_val = [], 0
         try:
             with self.engine.connect() as conn:
@@ -641,17 +680,14 @@ class MainWindow(QMainWindow):
                                                                                              lambda: None)()
 
 
-# --- UPDATED: Connect to PostgreSQL ---
 def create_db_engine():
     """Creates a SQLAlchemy engine for the PostgreSQL database."""
     try:
-        # Construct the database URL from the DB_CONFIG dictionary
         db_url = (
             f"postgresql+psycopg2://{DB_CONFIG['user']}:{DB_CONFIG['password']}@"
             f"{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
         )
         engine = create_engine(db_url)
-        # Test the connection
         with engine.connect() as connection:
             print("Successfully connected to the PostgreSQL database.")
         return engine
@@ -673,7 +709,7 @@ if __name__ == '__main__':
     db_engine = create_db_engine()
 
     if not db_engine:
-        sys.exit(1)  # Exit if engine creation failed
+        sys.exit(1)
 
     MOCK_USERNAME = "INVENTORY_MANAGER"
 
